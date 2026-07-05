@@ -21,6 +21,8 @@ HC_ROWS = [
     ["Full time", "JHR",     "1004", "E-3",  "Gone Away", "EA", datetime.datetime(2023, 1, 1), "Departed", datetime.datetime(2024, 6, 1), "e3@x.com"],
     ["Full time", "JHR",     "1005", "E-4",  "Orphan",    "EA", datetime.datetime(2024, 4, 1), "Active",   None,                          "e4@x.com"],
     ["Full time", "Migrate", "1006", "E-5",  "Fifth Emp", "CC", datetime.datetime(2024, 5, 1), "Active",   None,                          "e5@x.com"],
+    ["Full time", "JHR",     "1007", "TL-C", "Carol TL",  "EA", datetime.datetime(2024, 1, 15), "Active",  None,                          "carol@x.com"],
+    ["Full time", "JHR",     "1008", "E-6",  "Sixth Emp", "EA", datetime.datetime(2024, 6, 15), "Active",  None,                          "e6@x.com"],
     ["Full time", "JHR",     "1099", "N/A",  "Junk Row",  "Admin", datetime.datetime(2024, 6, 1), "Active", None,                        "junk@x.com"],
 ]
 
@@ -32,6 +34,8 @@ STRUCT_ROWS = [
     ["SM-A", "TL-A", "BT1", "T1", "E-3"],     # departed — should be excluded from employees
     ["boot camp", "boot camp", "boot camp", "boot camp", "E-BC"],  # placeholder + not in HC
     ["SM-B", "TL-B", "BT2", "T2", "E-5"],     # TL-B is not in HC
+    ["SM-A", "tl-c", "BT1", "T3", "TL-C"],    # TL ref uses different casing than HC ('TL-C')
+    ["SM-A", "tl-c", "BT1", "T3", "E-6"],     # employee under the lowercased TL ref
     # E-4 intentionally absent from Structure -> unmapped
 ]
 

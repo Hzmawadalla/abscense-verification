@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from ingestion.config import load_aliases  # noqa: E402
 from ingestion.reference import parse_reference  # noqa: E402
 
 
@@ -18,7 +19,7 @@ def main():
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
 
-    ref = parse_reference(args.src)
+    ref = parse_reference(args.src, aliases=load_aliases())
     print("STATS:", ref.stats)
 
     reasons = collections.Counter(e.reason for e in ref.exceptions)

@@ -21,3 +21,6 @@ Thumbs.db
 # Source attendance workbooks — never commit real HR/PII data
 /data/*.xlsx
 /data/*.xls
+
+# Real TL alias contacts (copy from the .example.json)
+/config/tl_aliases.json

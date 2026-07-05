@@ -1,0 +1,4 @@
+{
+  "_comment": "Nickname/CRM -> contact, for Team Leaders that appear in Structure but not HC. Keys are matched case-insensitively. Copy this to config/tl_aliases.json (git-ignored) and fill real emails.",
+  "zimmy": { "email": "REPLACE_ME@51talk.com", "name": "Zimmy" }
+}

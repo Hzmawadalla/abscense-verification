@@ -11,7 +11,7 @@ def _by_crm(items):
 def test_managers_are_distinct_tls_enriched_from_hc(sample_workbook):
     ref = parse_reference(sample_workbook)
     managers = _by_crm(ref.managers)
-    assert set(managers) == {"TL-A", "TL-B"}
+    assert set(managers) == {"TL-A", "TL-B", "TL-C"}
     assert managers["TL-A"].name == "Alice TL"
     assert managers["TL-A"].email == "alice@x.com"
 
@@ -26,7 +26,7 @@ def test_departed_employees_are_excluded(sample_workbook):
     ref = parse_reference(sample_workbook)
     crms = _by_crm(ref.employees)
     assert "E-3" not in crms
-    assert set(crms) == {"TL-A", "E-1", "E-2", "E-4", "E-5"}
+    assert set(crms) == {"TL-A", "E-1", "E-2", "E-4", "E-5", "TL-C", "E-6"}
 
 
 def test_employees_get_their_team_leader(sample_workbook):
@@ -53,6 +53,23 @@ def test_junk_crm_is_excluded_and_flagged(sample_workbook):
     ref = parse_reference(sample_workbook)
     assert "N/A" not in _by_crm(ref.employees)
     assert ("N/A", "invalid_crm") in {(e.crm, e.reason) for e in ref.exceptions}
+
+
+def test_crm_matching_is_case_insensitive(sample_workbook):
+    # Structure refers to TL as 'tl-c'; HC stores 'TL-C'. Must resolve, using HC's casing.
+    ref = parse_reference(sample_workbook)
+    assert _by_crm(ref.employees)["E-6"].manager_crm == "TL-C"
+    mgr = _by_crm(ref.managers)["TL-C"]
+    assert mgr.email == "carol@x.com"
+    assert "TL-C" not in {e.crm for e in ref.exceptions}
+
+
+def test_nickname_tl_resolved_via_alias(sample_workbook):
+    # TL-B is not in HC; an alias supplies its email so it needn't be flagged.
+    ref = parse_reference(sample_workbook, aliases={"tl-b": {"email": "bob@x.com", "name": "Bob TL"}})
+    mgr = _by_crm(ref.managers)["TL-B"]
+    assert mgr.email == "bob@x.com"
+    assert ("TL-B", "manager_not_in_hc") not in {(e.crm, e.reason) for e in ref.exceptions}
 
 
 def test_dates_are_parsed(sample_workbook):
