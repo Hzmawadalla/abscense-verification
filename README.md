@@ -10,13 +10,16 @@ See [`SPEC.md`](./SPEC.md) for the full design contract.
 
 Build Order (SPEC §9):
 
-- [x] **1. Schema + RLS + status vocabulary seed** ← current
-- [ ] 2. Reference seed from `HC` + `Structure`
-- [ ] 3. Ingestion function + `Summary Report` parser
-- [ ] 4. TL verification page
+- [x] 1. Schema + RLS + status vocabulary seed
+- [x] 2. Reference parser (`HC` + `Structure`)
+- [x] 3. Ingestion parser (`Summary Report` → cases)
+- [ ] 4. TL verification page ← needs a live Supabase project
 - [ ] 5. Email dispatch + notification tracking
 - [ ] 6. HRBP dashboard
 - [ ] 7. Manual period-close + audit/exceptions views
+
+Parsing/classification logic (steps 2–3) is pure Python, fully unit-tested. Loading that data
+into Postgres and the web layer (steps 4–7) require the Supabase backend to be provisioned.
 
 ## Layout
 

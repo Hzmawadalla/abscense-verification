@@ -50,9 +50,16 @@ def classify(raw):
     if n in OVERRIDES:
         bucket, canon = OVERRIDES[n]
         return (bucket, canon, is_hd)
-    if any(k in n for k in ANNOTATIONS):
-        return ("trigger", _base(n).title() or None, is_hd)
     b = _base(n)
+    # Leave-balance bookkeeping is not a TL attendance dispute (balance is ignored, SPEC §4).
+    if "deducted" in n or "from balance" in n:
+        return ("skip", b.title() or None, is_hd)
+    # Public holidays are org-wide, never a per-employee TL verification.
+    if b == "public holiday":
+        return ("skip", "Public Holiday", is_hd)
+    # Explicit mid-dispute / failed annotations -> verify.
+    if any(k in n for k in ANNOTATIONS):
+        return ("trigger", b.title() or None, is_hd)
     if b in TRIGGER_EXACT:
         return ("trigger", b.title(), is_hd)
     if b in SKIP_CLEAN or b in SKIP_LEAVES:
