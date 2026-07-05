@@ -1,0 +1,23 @@
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+dist/
+.netlify/
+
+# Supabase local
+supabase/.branches/
+supabase/.temp/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Source attendance workbooks — never commit real HR/PII data
+/data/*.xlsx
+/data/*.xls
