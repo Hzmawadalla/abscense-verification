@@ -21,6 +21,13 @@ SKIP_LEAVES = {
 }
 NOT_VERIFIED = {"late", "missing punch out", "half day", "halfday", "hlaf day", "2 hour excuse", "excuse"}
 TRIGGER_EXACT = {"absent", "no show"}
+
+# Curated manual classifications for values that aren't algorithmically derivable
+# (freeform notes / shorthand). Keyed on normalized raw value. Checked first.
+OVERRIDES = {
+    "sick": ("skip", "Sick Leave", "shorthand for Sick Leave (manual)"),
+    "asked for leave, on trip": ("skip", "Leave", "approved leave/trip (manual)"),
+}
 KNOWN_NOISE = {"#n/a", "0", "departed", "active", "resigned"}
 ANNOTATIONS = ("to be confirmed", "to be deducted", "deducted from balance",
                "pending", "failed", "returned", "applied on leave", "- check")
@@ -41,6 +48,8 @@ def classify(raw: str):
     n = norm(raw)
     if n == "":
         return None
+    if n in OVERRIDES:
+        return OVERRIDES[n]
     is_hd = "(hd)" in n or "half" in base_of(n)
     # 1) explicit mid-dispute / failed annotations win over the base word
     if any(k in n for k in ANNOTATIONS):

@@ -66,9 +66,9 @@ insert into status_vocabulary (raw_value, bucket, canonical_status, note) values
   ('hlaf day to be confirmed', 'trigger', 'Hlaf Day To Be Confirmed', 'annotation: unresolved/failed'),
   ('me-egss03大组', 'ignore', null, 'UNCLASSIFIED — data bleed, review'),
   ('public holiday - to be deducted annual leave', 'trigger', 'Public Holiday', 'annotation: unresolved/failed'),
-  ('sick', 'ignore', null, 'UNCLASSIFIED — data bleed, review'),
+  ('sick', 'skip', 'Sick Leave', 'shorthand for Sick Leave (manual)'),
   ('sick leave (returned)', 'trigger', 'Sick Leave', 'annotation: unresolved/failed'),
-  ('asked for leave, on trip', 'ignore', null, 'UNCLASSIFIED — data bleed, review')
+  ('asked for leave, on trip', 'skip', 'Leave', 'approved leave/trip (manual)')
 on conflict (raw_value) do update set
   bucket = excluded.bucket,
   canonical_status = excluded.canonical_status,
