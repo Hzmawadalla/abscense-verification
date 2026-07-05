@@ -1,6 +1,5 @@
-"""Shared fixtures. Builds a synthetic workbook that mirrors the real HC + Structure tabs
-(no PII), crafted to exercise every mapping edge: a TL, normal employees, a departed employee,
-an employee with no Structure row, a 'boot camp' placeholder, and a TL missing from HC."""
+"""Shared fixtures. Builds a synthetic workbook mirroring the real HC + Structure + Summary Report
+tabs (no PII), crafted to exercise every mapping and classification edge."""
 import datetime
 import sys
 from pathlib import Path
@@ -39,10 +38,17 @@ STRUCT_ROWS = [
     # E-4 intentionally absent from Structure -> unmapped
 ]
 
+# Summary Report matrix: row1 title, row2 blank, row3 headers, row4+ data.
+SUMMARY_HEADERS = ["CRM", "Normal Days", "Abnormal Days", "06-May", "07-May", "08-May"]
+SUMMARY_ROWS = [
+    ["E-1",       20, 3, "Absent",           "Normal",                "Annual Leave"],
+    ["E-2",       22, 1, "Weird Status XYZ", "Annual Leave (Failed)", "Unpaid Leave (HD) - To Be Confirmed"],
+    ["E-4",       18, 5, "Absent",           "Weekend",               "Normal"],
+    ["E-UNKNOWN", 10, 2, "Absent",           "Normal",                "Normal"],
+]
 
-@pytest.fixture
-def sample_workbook(tmp_path):
-    wb = openpyxl.Workbook()
+
+def _build_reference(wb):
     hc = wb.active
     hc.title = "HC"
     hc.append(HC_HEADERS)
@@ -52,6 +58,27 @@ def sample_workbook(tmp_path):
     st.append(STRUCT_HEADERS)
     for r in STRUCT_ROWS:
         st.append(r)
+
+
+@pytest.fixture
+def sample_workbook(tmp_path):
+    wb = openpyxl.Workbook()
+    _build_reference(wb)
     path = tmp_path / "sample.xlsx"
+    wb.save(path)
+    return str(path)
+
+
+@pytest.fixture
+def sample_workbook_with_summary(tmp_path):
+    wb = openpyxl.Workbook()
+    _build_reference(wb)
+    sm = wb.create_sheet("Summary Report")
+    sm.append(["Enhanced Attendance Summary Report"])
+    sm.append([])
+    sm.append(SUMMARY_HEADERS)
+    for r in SUMMARY_ROWS:
+        sm.append(r)
+    path = tmp_path / "sample_summary.xlsx"
     wb.save(path)
     return str(path)

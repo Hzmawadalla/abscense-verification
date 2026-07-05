@@ -61,14 +61,14 @@ insert into status_vocabulary (raw_value, bucket, canonical_status, note) values
   ('annual leave to be deducted', 'trigger', 'Annual Leave To Be Deducted', 'annotation: unresolved/failed'),
   ('bereavement leave - to be confirmed', 'trigger', 'Bereavement Leave', 'annotation: unresolved/failed'),
   ('egss-moatazb', 'ignore', null, 'UNCLASSIFIED — data bleed, review'),
-  ('half day', 'not_verified', 'Half Day', null),
-  ('halfday', 'not_verified', 'Halfday', null),
+  ('half day', 'not_verified', 'Half Day', 'half-day'),
+  ('halfday', 'not_verified', 'Halfday', 'half-day'),
   ('hlaf day to be confirmed', 'trigger', 'Hlaf Day To Be Confirmed', 'annotation: unresolved/failed'),
   ('me-egss03大组', 'ignore', null, 'UNCLASSIFIED — data bleed, review'),
   ('public holiday - to be deducted annual leave', 'trigger', 'Public Holiday', 'annotation: unresolved/failed'),
-  ('sick', 'skip', 'Sick Leave', 'shorthand for Sick Leave (manual)'),
+  ('sick', 'skip', 'Sick Leave', null),
   ('sick leave (returned)', 'trigger', 'Sick Leave', 'annotation: unresolved/failed'),
-  ('asked for leave, on trip', 'skip', 'Leave', 'approved leave/trip (manual)')
+  ('asked for leave, on trip', 'skip', 'Leave', null)
 on conflict (raw_value) do update set
   bucket = excluded.bucket,
   canonical_status = excluded.canonical_status,

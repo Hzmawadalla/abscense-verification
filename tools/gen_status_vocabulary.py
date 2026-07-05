@@ -7,68 +7,30 @@ Usage:
   python tools/gen_status_vocabulary.py --src "<path to xlsx>" \
       --out supabase/migrations/20260705000003_seed_status_vocabulary.sql
 """
-import argparse, re, sys, collections
+import argparse, sys, collections
+from pathlib import Path
+
 import openpyxl
 
-# --- classification rules (SPEC §4) --------------------------------------------------------------
-SKIP_CLEAN = {
-    "normal", "weekend", "public holiday", "not yet hired",
-    "present", "no leave", "leave approved", "leave approval",
-}
-SKIP_LEAVES = {
-    "annual leave", "sick leave", "casual leave", "continuing education leave",
-    "paternity leave", "bereavement leave", "unpaid leave",
-}
-NOT_VERIFIED = {"late", "missing punch out", "half day", "halfday", "hlaf day", "2 hour excuse", "excuse"}
-TRIGGER_EXACT = {"absent", "no show"}
-
-# Curated manual classifications for values that aren't algorithmically derivable
-# (freeform notes / shorthand). Keyed on normalized raw value. Checked first.
-OVERRIDES = {
-    "sick": ("skip", "Sick Leave", "shorthand for Sick Leave (manual)"),
-    "asked for leave, on trip": ("skip", "Leave", "approved leave/trip (manual)"),
-}
-KNOWN_NOISE = {"#n/a", "0", "departed", "active", "resigned"}
-ANNOTATIONS = ("to be confirmed", "to be deducted", "deducted from balance",
-               "pending", "failed", "returned", "applied on leave", "- check")
-
-
-def norm(raw: str) -> str:
-    return re.sub(r"\s+", " ", str(raw).strip().lower())
-
-
-def base_of(n: str) -> str:
-    b = re.sub(r"\(.*?\)", "", n)      # drop (HD), (Failed), (Returned) ...
-    b = b.split(" - ")[0]             # drop " - Check" / " - To Be deducted ..."
-    return re.sub(r"\s+", " ", b).strip()
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from ingestion.status_rules import classify as _classify, normalize as norm  # noqa: E402
 
 
 def classify(raw: str):
-    """Return (bucket, canonical_status, note)."""
+    """Return (bucket, canonical_status, note) for the seed, wrapping the shared rules."""
     n = norm(raw)
     if n == "":
         return None
-    if n in OVERRIDES:
-        return OVERRIDES[n]
-    is_hd = "(hd)" in n or "half" in base_of(n)
-    # 1) explicit mid-dispute / failed annotations win over the base word
-    if any(k in n for k in ANNOTATIONS):
-        return ("trigger", base_of(n).title() or None, "annotation: unresolved/failed")
-    b = base_of(n)
-    # 2) genuine unexplained absence
-    if b in TRIGGER_EXACT:
-        return ("trigger", b.title(), None)
-    # 3) clean/resolved
-    if b in SKIP_CLEAN or b in SKIP_LEAVES:
-        return ("skip", b.title(), "half-day" if is_hd else None)
-    # 4) deducts but not verified this stage
-    if b in NOT_VERIFIED:
-        return ("not_verified", b.title(), None)
-    # 5) known systematic noise
-    if n in KNOWN_NOISE or n.isdigit():
-        return ("ignore", None, "known noise / column bleed")
-    # 6) everything else (stray names, team codes, CRMs) -> ignore but flag for a human
-    return ("ignore", None, "UNCLASSIFIED — data bleed, review")
+    bucket, canon, is_hd = _classify(raw)
+    if bucket == "unknown":
+        return ("ignore", None, "UNCLASSIFIED — data bleed, review")
+    if bucket == "trigger" and canon and canon.lower() not in ("absent", "no show"):
+        note = "annotation: unresolved/failed"
+    elif bucket == "ignore":
+        note = "known noise / column bleed"
+    else:
+        note = "half-day" if is_hd else None
+    return (bucket, canon, note)
 
 
 def sqlstr(v):
