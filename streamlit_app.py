@@ -13,6 +13,7 @@ import streamlit as st
 
 from app import data
 from app.dingtalk import DingTalkClient
+from app.storage import StorageClient, object_path, validate_upload
 from ingestion import loader
 from ingestion.config import load_aliases, load_dingtalk_ids
 from ingestion.db_psycopg import PsycopgDB
@@ -51,6 +52,14 @@ def dingtalk_client():
     if not (ak and sk and ag):
         return None
     return DingTalkClient(ak, sk, ag)
+
+
+def storage_client():
+    url = st.secrets.get("SUPABASE_URL", os.environ.get("SUPABASE_URL"))
+    key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", os.environ.get("SUPABASE_SERVICE_ROLE_KEY"))
+    if not (url and key):
+        return None
+    return StorageClient(url, key)
 
 
 def send_tl_link(c, client, mgr, base):
@@ -101,17 +110,31 @@ def render_tl(token: str):
             if VERDICTS[verdict] == "leave":
                 leave_type = col2.text_input("Leave type", value=cs["leave_type"] or "",
                                              key=f"l{cs['id']}", placeholder="annual / sick / unpaid …")
-            choices[cs["id"]] = (VERDICTS[verdict], leave_type, comment)
+            upl = col2.file_uploader("Attach proof (pdf/jpg/png)", type=["pdf", "jpg", "jpeg", "png"],
+                                     key=f"f{cs['id']}")
+            choices[cs["id"]] = (VERDICTS[verdict], leave_type, comment, upl)
             st.divider()
         if st.form_submit_button("Submit all", type="primary"):
             actor = f"tl:{mgr['crm']}"
-            ok = stale = 0
-            for cid, (ms, lt, cm) in choices.items():
-                if data.submit_verdict(c, cid, ms, lt, cm, actor):
-                    ok += 1
-                else:
+            sc = storage_client()
+            ok = stale = files = 0
+            for cid, (ms, lt, cm, upl) in choices.items():
+                if not data.submit_verdict(c, cid, ms, lt, cm, actor):
                     stale += 1
-            st.success(f"Saved {ok} response(s)." + (f" {stale} were already closed by HR." if stale else ""))
+                    continue
+                ok += 1
+                if upl is not None and sc is not None:
+                    try:
+                        validate_upload(upl.type, upl.size)
+                        path = sc.upload(object_path(cid, upl.name), upl.getvalue(), upl.type)
+                        data.add_attachment(c, cid, path, upl.name, upl.type, upl.size)
+                        files += 1
+                    except Exception as e:  # noqa: BLE001 — show the TL why an attachment didn't stick
+                        st.warning(f"Attachment for one case failed: {e}")
+            msg = f"Saved {ok} response(s)."
+            msg += f" {files} attachment(s)." if files else ""
+            msg += f" {stale} were already closed by HR." if stale else ""
+            st.success(msg)
             st.rerun()
 
 
@@ -164,6 +187,15 @@ def render_hrbp():
             pick = st.selectbox("Case", list(label))
             r = label[pick]
             st.write(f"TL verdict: **{r['manager_status']}** · comment: {r['manager_comment'] or '—'}")
+            sc = storage_client()
+            for a in data.list_attachments(c, r["id"]):
+                if sc:
+                    try:
+                        st.markdown(f"📎 [{a['filename']}]({sc.signed_url(a['storage_path'])})")
+                    except Exception as e:  # noqa: BLE001
+                        st.caption(f"📎 {a['filename']} (link error: {e})")
+                else:
+                    st.caption(f"📎 {a['filename']} (storage not configured)")
             cc = st.columns(2)
             if cc[0].button("✅ Close as-is (accept TL verdict)"):
                 data.close_case(c, r["id"], actor)

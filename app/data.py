@@ -216,3 +216,21 @@ def record_notification(conn, manager_id, channel, case_count, status,
             "values (%s, %s, %s, %s, %s, %s, %s)",
             (manager_id, ingestion_run_id, channel, case_count, status, provider_message_id, error))
     conn.commit()
+
+
+# --------------------------------------------------------------------------- attachments
+def add_attachment(conn, case_id, storage_path, filename, content_type, size_bytes) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into attendance.case_attachments "
+            "(case_id, storage_path, filename, content_type, size_bytes) "
+            "values (%s, %s, %s, %s, %s)",
+            (case_id, storage_path, filename, content_type, size_bytes))
+    conn.commit()
+
+
+def list_attachments(conn, case_id):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("select storage_path, filename, content_type from attendance.case_attachments "
+                    "where case_id = %s order by uploaded_at", (case_id,))
+        return cur.fetchall()

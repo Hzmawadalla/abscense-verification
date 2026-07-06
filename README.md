@@ -14,9 +14,9 @@ Build Order (SPEC §9):
 - [x] 2. Reference parser (`HC` + `Structure`)
 - [x] 3. Ingestion parser (`Summary Report` → cases)
 - [x] 4. DB loader + in-app ingestion (upload workbook → cases)
+- [x] 5. DingTalk dispatch of TL links + notification tracking (needs app credentials to send)
 - [x] 6. TL verification page + HRBP dashboard + exceptions + period-close (Streamlit)
-- [ ] 5. Email dispatch of TL links + notification tracking (links are generated in-app; sending TBD)
-- [ ] 7. Attachment uploads to Supabase Storage (TL comment works; file upload TBD)
+- [x] 7. Attachment uploads to Supabase Storage (private bucket, signed-URL viewing)
 
 The app is **Streamlit** (Python), reusing the `ingestion/` package. Two access layers:
 HRBP (email+password) and TL (unique `?t=<token>` link).
