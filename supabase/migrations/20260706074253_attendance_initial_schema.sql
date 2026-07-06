@@ -4,6 +4,10 @@
 
 begin;
 
+-- Isolate this system in its own schema so it coexists with other apps sharing this database.
+create schema if not exists attendance;
+set search_path = attendance, public;
+
 -- ---------------------------------------------------------------------------
 -- Enums
 -- ---------------------------------------------------------------------------

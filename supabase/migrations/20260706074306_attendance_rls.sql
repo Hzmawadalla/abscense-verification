@@ -8,6 +8,8 @@
 
 begin;
 
+set search_path = attendance, public;
+
 do $$
 declare t text;
 begin

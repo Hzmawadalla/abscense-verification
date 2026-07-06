@@ -2,6 +2,8 @@
 -- Source: C:/Users/51talk/OneDrive/51 Talk/P&C/Com&Ben/Attendance/Jun-26/Final/Attendance_Report_May-Jun V.3.xlsx
 -- Re-run the generator to refresh. Idempotent via ON CONFLICT.
 
+set search_path = attendance, public;
+
 insert into status_vocabulary (raw_value, bucket, canonical_status, note) values
   ('normal', 'skip', 'Normal', null),
   ('weekend', 'skip', 'Weekend', null),
