@@ -12,8 +12,9 @@ import os
 import streamlit as st
 
 from app import data
+from app.dingtalk import DingTalkClient
 from ingestion import loader
-from ingestion.config import load_aliases
+from ingestion.config import load_aliases, load_dingtalk_ids
 from ingestion.db_psycopg import PsycopgDB
 from ingestion.reference import parse_reference
 from ingestion.summary import ingest_summary
@@ -41,6 +42,29 @@ def conn():
         get_conn.clear()
         c = get_conn()
     return c
+
+
+def dingtalk_client():
+    ak = st.secrets.get("DINGTALK_APP_KEY", os.environ.get("DINGTALK_APP_KEY"))
+    sk = st.secrets.get("DINGTALK_APP_SECRET", os.environ.get("DINGTALK_APP_SECRET"))
+    ag = st.secrets.get("DINGTALK_AGENT_ID", os.environ.get("DINGTALK_AGENT_ID"))
+    if not (ak and sk and ag):
+        return None
+    return DingTalkClient(ak, sk, ag)
+
+
+def send_tl_link(c, client, mgr, base):
+    """Rotate a link and DM it to the TL over DingTalk; record the attempt either way."""
+    token = data.generate_manager_link(c, mgr["id"])
+    link = f"{base}/?t={token}"
+    try:
+        resp = client.send_link(mgr["dingtalk_userid"], mgr["name"], link, mgr["open_cases"])
+        data.record_notification(c, mgr["id"], "dingtalk", mgr["open_cases"], "sent",
+                                 provider_message_id=str(resp.get("task_id")))
+        return True, None
+    except Exception as e:  # noqa: BLE001 — surface any dispatch failure, never silently drop
+        data.record_notification(c, mgr["id"], "dingtalk", mgr["open_cases"], "failed", error=str(e))
+        return False, str(e)
 
 
 # ============================================================ TL LAYER (token link)
@@ -170,8 +194,10 @@ def render_hrbp():
                 db = PsycopgDB(c)
                 loader.load_reference(db, ref)
                 summary = loader.load_ingestion(db, res, reference=ref, source_filename=up.name)
+            applied = data.set_dingtalk_ids(c, load_dingtalk_ids())
             st.success(f"Loaded {summary.cases} cases, {summary.exceptions} exceptions "
-                       f"({ref.stats['mapped_employees']}/{ref.stats['employees']} employees mapped).")
+                       f"({ref.stats['mapped_employees']}/{ref.stats['employees']} employees mapped)."
+                       + (f" Applied {applied} DingTalk id(s)." if applied else ""))
 
     with tab_exc:
         exc = data.list_exceptions(c, resolved=False)
@@ -179,16 +205,36 @@ def render_hrbp():
         st.dataframe(exc, use_container_width=True, hide_index=True)
 
     with tab_links:
-        st.write("Generate or rotate the unique verification link for each Team Leader.")
+        st.write("Generate each TL's unique link and DM it via DingTalk.")
         base = st.text_input("App base URL", st.secrets.get("APP_BASE_URL", "https://your-app.streamlit.app"))
-        for mgr in data.list_managers(c):
-            cols = st.columns([3, 1, 3])
-            cols[0].write(f"**{mgr['name'] or mgr['crm']}** ({mgr['email'] or 'no email'})")
-            if cols[1].button("Generate", key=f"gl{mgr['id']}"):
+        client = dingtalk_client()
+        if client is None:
+            st.warning("DingTalk not configured (DINGTALK_APP_KEY / _SECRET / _AGENT_ID). "
+                       "You can still generate links to copy manually.")
+        overview = data.managers_overview(c)
+
+        if client and st.button("📨 Send to ALL TLs with open cases", type="primary"):
+            sent = fail = 0
+            for mgr in overview:
+                if mgr["dingtalk_userid"] and mgr["open_cases"]:
+                    ok, _ = send_tl_link(c, client, mgr, base)
+                    sent += ok
+                    fail += (not ok)
+            st.success(f"DingTalk: sent {sent}, failed {fail}.")
+
+        for mgr in overview:
+            cols = st.columns([3, 1, 1, 3])
+            uid = mgr["dingtalk_userid"] or "— no userid —"
+            cols[0].write(f"**{mgr['name'] or mgr['crm']}** · {mgr['open_cases']} open · dingtalk: `{uid}`")
+            if cols[1].button("Link", key=f"gl{mgr['id']}"):
                 tok = data.generate_manager_link(c, mgr["id"])
                 st.session_state[f"link{mgr['id']}"] = f"{base}/?t={tok}"
+            can_send = bool(client and mgr["dingtalk_userid"] and mgr["open_cases"])
+            if cols[2].button("Send", key=f"snd{mgr['id']}", disabled=not can_send):
+                ok, err = send_tl_link(c, client, mgr, base)
+                st.success(f"Sent to {mgr['name']}.") if ok else st.error(f"Failed: {err}")
             if st.session_state.get(f"link{mgr['id']}"):
-                cols[2].code(st.session_state[f"link{mgr['id']}"], language=None)
+                cols[3].code(st.session_state[f"link{mgr['id']}"], language=None)
 
     with tab_close:
         st.warning("Closes every remaining open case as **Absent** (period cutoff). Cannot be undone.")

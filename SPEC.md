@@ -26,7 +26,10 @@ The system replaces today's manual process: the per-manager `*Verification` tabs
 - **Supabase**: Postgres (data) + Storage (TL attachments), reached from Streamlit via a direct
   Postgres connection (`SUPABASE_DB_URL` in Streamlit secrets). Tables live in the `attendance`
   schema; RLS denies anon/authenticated, so only this server-side connection reads/writes them.
-- **Email**: Resend (or SMTP) from Streamlit (Python) to send TL links. ~dozens/period — free tier fine.
+- **DingTalk**: TL links are delivered as private work-notification DMs via a DingTalk corporate
+  internal app (identified by each TL's DingTalk userid). Every send is recorded in `notifications`
+  (channel `dingtalk`). Config: `DINGTALK_APP_KEY` / `_SECRET` / `_AGENT_ID` in secrets;
+  CRM→userid mapping in `config/tl_dingtalk.json`.
 - **Attendance source**: workbook uploaded **in-app** by HRBP each period (no CLI). Ingestion sits
   behind an interface so an **iTalent** source can replace the Excel later without touching
   case/verification logic.

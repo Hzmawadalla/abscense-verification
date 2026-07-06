@@ -1,0 +1,4 @@
+{
+  "_comment": "Map each Team Leader's CRM to their DingTalk userid. Copy to config/tl_dingtalk.json (git-ignored). Applied to managers.dingtalk_userid on ingestion.",
+  "EGLP-ahmedalfy": "REPLACE_WITH_DINGTALK_USERID"
+}

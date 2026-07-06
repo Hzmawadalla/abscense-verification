@@ -179,3 +179,40 @@ def counts_by_status(conn):
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute("select status, count(*) as n from attendance.cases group by status")
         return {r["status"]: r["n"] for r in cur.fetchall()}
+
+
+# --------------------------------------------------------------------------- DingTalk / notifications
+def set_dingtalk_ids(conn, mapping) -> int:
+    """Apply a {CRM -> DingTalk userid} mapping onto managers (case-insensitive on CRM)."""
+    if not mapping:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany(
+            "update attendance.managers set dingtalk_userid = %s where lower(crm) = lower(%s)",
+            [(uid, crm) for crm, uid in mapping.items()])
+    conn.commit()
+    return len(mapping)
+
+
+def managers_overview(conn):
+    """Each active TL with their open-case count, DingTalk userid, and whether a link exists."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "select m.id, m.crm, m.name, m.dingtalk_userid, "
+            "       (m.access_token_hash is not null) as has_link, "
+            "       count(c.id) filter (where c.status in ('open','manager_responded')) as open_cases "
+            "from attendance.managers m "
+            "left join attendance.cases c on c.manager_id = m.id "
+            "where m.active group by m.id order by open_cases desc, m.name")
+        return cur.fetchall()
+
+
+def record_notification(conn, manager_id, channel, case_count, status,
+                        provider_message_id=None, error=None, ingestion_run_id=None) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into attendance.notifications "
+            "(manager_id, ingestion_run_id, channel, case_count, status, provider_message_id, error) "
+            "values (%s, %s, %s, %s, %s, %s, %s)",
+            (manager_id, ingestion_run_id, channel, case_count, status, provider_message_id, error))
+    conn.commit()
