@@ -1,3 +1,6 @@
 openpyxl>=3.1
 psycopg[binary]>=3.2
+streamlit>=1.40
+streamlit-authenticator>=0.4
+bcrypt>=4.1
 pytest>=8.0

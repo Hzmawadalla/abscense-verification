@@ -10,16 +10,29 @@ See [`SPEC.md`](./SPEC.md) for the full design contract.
 
 Build Order (SPEC §9):
 
-- [x] 1. Schema + RLS + status vocabulary seed
+- [x] 1. Schema + RLS + status vocabulary seed  → **deployed** (Supabase `attendance` schema)
 - [x] 2. Reference parser (`HC` + `Structure`)
 - [x] 3. Ingestion parser (`Summary Report` → cases)
-- [ ] 4. TL verification page ← needs a live Supabase project
-- [ ] 5. Email dispatch + notification tracking
-- [ ] 6. HRBP dashboard
-- [ ] 7. Manual period-close + audit/exceptions views
+- [x] 4. DB loader + in-app ingestion (upload workbook → cases)
+- [x] 6. TL verification page + HRBP dashboard + exceptions + period-close (Streamlit)
+- [ ] 5. Email dispatch of TL links + notification tracking (links are generated in-app; sending TBD)
+- [ ] 7. Attachment uploads to Supabase Storage (TL comment works; file upload TBD)
 
-Parsing/classification logic (steps 2–3) is pure Python, fully unit-tested. Loading that data
-into Postgres and the web layer (steps 4–7) require the Supabase backend to be provisioned.
+The app is **Streamlit** (Python), reusing the `ingestion/` package. Two access layers:
+HRBP (email+password) and TL (unique `?t=<token>` link).
+
+## Running the app
+
+```bash
+pip install -r requirements.txt
+# one-time: create the first HRBP login
+SUPABASE_DB_URL=postgresql://... python tools/create_hrbp.py --email you@x.com --name "You"
+# run
+SUPABASE_DB_URL=postgresql://... streamlit run streamlit_app.py
+```
+
+Configure secrets in `.streamlit/secrets.toml` (see `.streamlit/secrets.toml.example`) or, on
+Streamlit Community Cloud, in the app's Secrets manager.
 
 ## Layout
 

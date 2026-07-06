@@ -17,13 +17,20 @@ The system replaces today's manual process: the per-manager `*Verification` tabs
 
 ## 2. Stack
 
-- **Supabase**: Postgres (data), Auth (HRBP login only), Storage (TL attachments), Row Level Security.
-- **Netlify**: static frontend (TL page + HRBP dashboard), Functions (API layer, email dispatch).
-  No scheduler — ingestion and period-close are both HRBP-triggered.
-- **Email**: Resend (or SMTP) via Netlify Function. ~dozens of TLs/period — free tier is fine.
-- **Attendance source**: `Attendance_Report_May-Jun V.3.xlsx`, uploaded to the dashboard each period.
-  Ingestion sits behind an interface so an **iTalent** source can replace the Excel later without
-  touching case/verification logic.
+- **Streamlit** (Python): single app hosting both layers, on **Streamlit Community Cloud**.
+  All ingestion/parsing/loader logic is the same Python package (`ingestion/`), reused directly.
+  - **HRBP layer** — per-user email+password login (backed by `hrbp_users`, bcrypt hashes;
+    `streamlit-authenticator`). Access: ingest, dashboard, close/override, exceptions.
+  - **TL layer** — unique link `…/?t=<token>`, no login; the token is the credential. Sees only
+    their own team's open cases.
+- **Supabase**: Postgres (data) + Storage (TL attachments), reached from Streamlit via a direct
+  Postgres connection (`SUPABASE_DB_URL` in Streamlit secrets). Tables live in the `attendance`
+  schema; RLS denies anon/authenticated, so only this server-side connection reads/writes them.
+- **Email**: Resend (or SMTP) from Streamlit (Python) to send TL links. ~dozens/period — free tier fine.
+- **Attendance source**: workbook uploaded **in-app** by HRBP each period (no CLI). Ingestion sits
+  behind an interface so an **iTalent** source can replace the Excel later without touching
+  case/verification logic.
+- No scheduler — ingestion and period-close are both HRBP-triggered in-app.
 
 ## 3. Data Sources (all tabs keyed on `CRM`)
 

@@ -3,6 +3,12 @@
 .env.*
 !.env.example
 
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
 # Node
 node_modules/
 dist/
@@ -24,3 +30,6 @@ Thumbs.db
 
 # Real TL alias contacts (copy from the .example.json)
 /config/tl_aliases.json
+
+# Streamlit secrets
+/.streamlit/secrets.toml

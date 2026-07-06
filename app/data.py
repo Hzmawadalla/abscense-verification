@@ -1,0 +1,181 @@
+"""Data access for the Streamlit app. Thin functions over a psycopg connection, all schema-qualified
+to `attendance`. Verification writes use optimistic locking and always append to the audit log."""
+import json
+
+from psycopg.rows import dict_row
+
+from app import security
+
+
+# --------------------------------------------------------------------------- audit
+def _audit(cur, case_id, actor, action, old, new):
+    cur.execute(
+        "insert into attendance.audit_log (case_id, actor, action, old_value, new_value) "
+        "values (%s, %s, %s, %s, %s)",
+        (case_id, actor, action, json.dumps(old) if old is not None else None,
+         json.dumps(new) if new is not None else None),
+    )
+
+
+# --------------------------------------------------------------------------- HRBP auth
+def hrbp_credentials(conn) -> dict:
+    """Build the streamlit-authenticator credentials dict from active HRBP users."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("select email, name, password_hash from attendance.hrbp_users "
+                    "where active and password_hash is not null")
+        rows = cur.fetchall()
+    return {"usernames": {
+        r["email"]: {"email": r["email"], "name": r["name"] or r["email"], "password": r["password_hash"]}
+        for r in rows
+    }}
+
+
+def create_hrbp(conn, email, name, password) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            "insert into attendance.hrbp_users (email, name, password_hash, active) "
+            "values (%s, %s, %s, true) "
+            "on conflict (email) do update set name = excluded.name, "
+            "password_hash = excluded.password_hash, active = true",
+            (email.lower().strip(), name, security.hash_password(password)),
+        )
+    conn.commit()
+
+
+# --------------------------------------------------------------------------- TL token
+def manager_by_token(conn, token):
+    """Resolve a raw TL token to their manager row, or None."""
+    if not token:
+        return None
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("select id, crm, name, email, access_token_hash, active "
+                    "from attendance.managers where access_token_hash = %s and active",
+                    (security.hash_token(token),))
+        return cur.fetchone()
+
+
+def generate_manager_link(conn, manager_id) -> str:
+    """Issue (or rotate) a TL token; store only its hash, return the raw token for the link."""
+    token = security.generate_token()
+    with conn.cursor() as cur:
+        cur.execute("update attendance.managers set access_token_hash = %s where id = %s",
+                    (security.hash_token(token), manager_id))
+    conn.commit()
+    return token
+
+
+# --------------------------------------------------------------------------- cases (TL side)
+def open_cases_for_manager(conn, manager_id):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "select c.id, c.work_date, c.source_status, c.is_half_day, c.status, "
+            "       c.manager_status, c.leave_type, c.manager_comment, "
+            "       e.name as employee_name, e.crm as employee_crm "
+            "from attendance.cases c join attendance.employees e on e.id = c.employee_id "
+            "where c.manager_id = %s and c.status in ('open','manager_responded') "
+            "order by e.name, c.work_date",
+            (manager_id,))
+        return cur.fetchall()
+
+
+def submit_verdict(conn, case_id, manager_status, leave_type, comment, actor) -> bool:
+    """Optimistically write a TL verdict. Returns False if the case was already closed."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("select status, manager_status, leave_type, manager_comment "
+                    "from attendance.cases where id = %s", (case_id,))
+        old = cur.fetchone()
+        if old is None or old["status"] == "closed":
+            return False
+        cur.execute(
+            "update attendance.cases set status = 'manager_responded', manager_status = %s, "
+            "leave_type = %s, manager_comment = %s, manager_responded_at = now() "
+            "where id = %s and status in ('open','manager_responded')",
+            (manager_status, leave_type, comment, case_id))
+        if cur.rowcount == 0:
+            conn.rollback()
+            return False
+        _audit(cur, case_id, actor, "tl_verdict", old,
+               {"manager_status": manager_status, "leave_type": leave_type, "manager_comment": comment})
+    conn.commit()
+    return True
+
+
+# --------------------------------------------------------------------------- cases (HRBP side)
+def list_cases(conn, status=None, team=None, manager_id=None):
+    q = ("select c.id, c.work_date, c.source_status, c.status, c.manager_status, c.leave_type, "
+         "       c.manager_comment, c.final_status, c.closed_by, "
+         "       e.name as employee_name, e.team, m.name as manager_name "
+         "from attendance.cases c "
+         "join attendance.employees e on e.id = c.employee_id "
+         "left join attendance.managers m on m.id = c.manager_id where true ")
+    params = []
+    if status:
+        q += "and c.status = %s "; params.append(status)
+    if team:
+        q += "and e.team = %s "; params.append(team)
+    if manager_id:
+        q += "and c.manager_id = %s "; params.append(manager_id)
+    q += "order by c.status, e.name, c.work_date"
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(q, tuple(params))
+        return cur.fetchall()
+
+
+def close_case(conn, case_id, actor, final_status=None, final_leave_type=None, comment=None) -> bool:
+    """Close a case. final_status=None means 'accept the TL verdict'; else HRBP override."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("select status, manager_status, leave_type, final_status "
+                    "from attendance.cases where id = %s", (case_id,))
+        old = cur.fetchone()
+        if old is None or old["status"] == "closed":
+            return False
+        final = final_status or old["manager_status"]
+        leave = final_leave_type if final_status else old["leave_type"]
+        cur.execute(
+            "update attendance.cases set status = 'closed', final_status = %s, final_leave_type = %s, "
+            "closed_by = 'hrbp', closed_at = now(), "
+            "manager_comment = coalesce(%s, manager_comment) where id = %s and status <> 'closed'",
+            (final, leave, comment, case_id))
+        if cur.rowcount == 0:
+            conn.rollback()
+            return False
+        _audit(cur, case_id, actor, "hrbp_override" if final_status else "hrbp_close",
+               old, {"final_status": final, "final_leave_type": leave})
+    conn.commit()
+    return True
+
+
+def close_open_month(conn, actor) -> int:
+    """Period close: stand every remaining open case as Absent (SPEC §6.5)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "update attendance.cases set status = 'closed', final_status = 'absent', "
+            "closed_by = 'hrbp_cutoff', closed_at = now() "
+            "where status in ('open','manager_responded') returning id")
+        ids = [r[0] for r in cur.fetchall()]
+        for cid in ids:
+            _audit(cur, cid, actor, "auto_close_absent", None, {"final_status": "absent"})
+    conn.commit()
+    return len(ids)
+
+
+def list_exceptions(conn, resolved=False):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("select id, crm, work_date, raw_value, reason, resolved, created_at "
+                    "from attendance.ingestion_exceptions where resolved = %s "
+                    "order by reason, crm", (resolved,))
+        return cur.fetchall()
+
+
+def list_managers(conn):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("select id, crm, name, email, "
+                    "(access_token_hash is not null) as has_link from attendance.managers "
+                    "where active order by name")
+        return cur.fetchall()
+
+
+def counts_by_status(conn):
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("select status, count(*) as n from attendance.cases group by status")
+        return {r["status"]: r["n"] for r in cur.fetchall()}
