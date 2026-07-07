@@ -23,4 +23,6 @@ class PsycopgDB:
 
 def connect(dsn):
     import psycopg
-    return psycopg.connect(dsn)
+    # prepare_threshold=None disables server-side prepared statements, which are unsupported on
+    # Supabase's transaction pooler (pgbouncer). Safe for both pooler modes and direct connections.
+    return psycopg.connect(dsn, prepare_threshold=None)

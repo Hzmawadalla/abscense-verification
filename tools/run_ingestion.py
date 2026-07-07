@@ -11,6 +11,21 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+def _load_env_file(path=".env"):
+    """Minimal .env reader (no shell interpretation, so passwords with special chars are safe)."""
+    p = Path(path)
+    if not p.exists():
+        return
+    for raw in p.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
 from ingestion import loader                          # noqa: E402
 from ingestion.config import load_aliases             # noqa: E402
 from ingestion.db_psycopg import PsycopgDB, connect   # noqa: E402
@@ -25,6 +40,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="parse and report, but do not write to the DB")
     args = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
+    _load_env_file()
 
     ref = parse_reference(args.src, aliases=load_aliases())
     res = ingest_summary(args.src, ref, year=args.year)
