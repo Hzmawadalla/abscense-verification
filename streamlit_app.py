@@ -44,7 +44,15 @@ def get_conn():
     if not dsn:
         st.error("SUPABASE_DB_URL is not configured (Streamlit Secrets or env).")
         st.stop()
-    return psycopg.connect(dsn, autocommit=False)
+    # autocommit=True so reads/writes never leave an idle-in-transaction session: if the app
+    # process is killed (reboot/redeploy), the pooled connection would otherwise linger holding
+    # locks and block later writes until statement_timeout. Multi-statement writes that need
+    # atomicity use explicit `with conn.transaction()` blocks (see the ingest tab).
+    cn = psycopg.connect(dsn, autocommit=True, prepare_threshold=None)
+    # Safety net for any transaction that does linger (e.g. process killed mid-ingest): make the
+    # server auto-abort it (and release its locks) quickly instead of holding until the timeout.
+    cn.execute("set idle_in_transaction_session_timeout = '30s'")
+    return cn
 
 
 def conn():
