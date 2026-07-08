@@ -74,16 +74,29 @@ def ingest_summary(path, reference, year, sheet="Summary Report", header_row=3):
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
         ws = wb[sheet]
-        rows = list(ws.iter_rows(min_row=header_row, values_only=True))
+        all_rows = list(ws.iter_rows(min_row=1, values_only=True))
     finally:
         wb.close()
 
-    if not rows:
+    if not all_rows:
         return IngestionResult(stats={"rows": 0})
-    header = rows[0]
-    crm_idx = next((i for i, h in enumerate(header) if norm_header(h) == "crm"), None)
-    if crm_idx is None:
+
+    # The header's position varies by export: the attendance-tool report carries title rows above
+    # it (header on row 3), while the manually-prepared check sheet puts it on row 1. Rather than
+    # trust a fixed header_row, locate the header as the first row containing a 'CRM' cell (scanning
+    # from the hint downward first, then from the top). This tolerates both layouts.
+    def _header_at(idx):
+        return idx < len(all_rows) and any(norm_header(h) == "crm" for h in all_rows[idx])
+
+    hdr_idx = next((i for i in range(header_row - 1, len(all_rows)) if _header_at(i)), None)
+    if hdr_idx is None:
+        hdr_idx = next((i for i in range(len(all_rows)) if _header_at(i)), None)
+    if hdr_idx is None:
         raise ValueError("no 'CRM' column found in Summary Report header")
+
+    rows = all_rows[hdr_idx:]
+    header = rows[0]
+    crm_idx = next(i for i, h in enumerate(header) if norm_header(h) == "crm")
     day_cols = [(i, d) for i, h in enumerate(header) if (d := parse_day_header(h, year))]
     if not day_cols:
         raise ValueError("no date columns parsed — check the year / header_row")
