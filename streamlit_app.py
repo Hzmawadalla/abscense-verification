@@ -250,8 +250,8 @@ def render_hrbp():
                          "**Summary Report** sheet (from the attendance tool).")
                 st.stop()
 
-            with c:  # one transaction; commits on success
-                db = PsycopgDB(c)
+            with c.transaction():  # atomic; commits on success WITHOUT closing the pooled
+                db = PsycopgDB(c)   # connection (psycopg3's `with conn:` would close it)
                 loader.load_reference(db, ref)
                 summary = loader.load_ingestion(db, res, reference=ref, source_filename=att_src.name)
             applied = data.set_dingtalk_ids(c, load_dingtalk_ids())
