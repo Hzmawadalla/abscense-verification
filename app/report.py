@@ -20,7 +20,8 @@ from ingestion.workbook import norm_header
 
 CHANGES_SHEET = "Changes"
 MATRIX_SHEET_HINT = "Summary Report"
-CHANGES_HEADER = ["CRM", "Employee", "Date", "Before", "After", "TL", "Closed by", "Comment"]
+CHANGES_HEADER = ["CRM", "Employee", "Date", "Before", "After", "TL", "Closed by", "Comment",
+                  "In workbook?"]
 
 
 def _locate_header(ws):
@@ -54,34 +55,35 @@ def build_reconciled_report(matrix_path, closed_cases, labels, year,
         if d is not None:
             date_cols[d] = j + 1
 
-    final_by_cell = {}  # (crm_key, date) -> final verdict code
-    for cs in closed_cases:
-        key = _key(_clean(cs["employee_crm"]))
-        if key and cs.get("work_date") is not None:
-            final_by_cell[(key, cs["work_date"])] = cs["final_status"]
-
+    # crm_key -> matrix row number, so we can both overwrite the cell and tell whether the
+    # employee is even present in this workbook (a case from another period/file won't be).
+    row_by_key = {}
     for r in range(hdr_row + 1, ws.max_row + 1):
         key = _key(_clean(ws.cell(row=r, column=crm_col).value))
-        if not key:
-            continue
-        for d, col in date_cols.items():
-            code = final_by_cell.get((key, d))
-            if code is not None:
-                ws.cell(row=r, column=col).value = labels.get(code, code)
+        if key and key not in row_by_key:
+            row_by_key[key] = r
 
     ch = wb.create_sheet(CHANGES_SHEET)
     ch.append(CHANGES_HEADER)
     for cs in closed_cases:
         wd = cs.get("work_date")
+        row = row_by_key.get(_key(_clean(cs.get("employee_crm"))))
+        col = date_cols.get(wd)
+        code = cs.get("final_status")
+        label = labels.get(code, code)
+        in_workbook = row is not None and col is not None
+        if in_workbook:  # only overwrite a cell that actually exists in this file
+            ws.cell(row=row, column=col).value = label
         ch.append([
             cs.get("employee_crm"),
             cs.get("employee_name"),
             wd.isoformat() if wd is not None else None,
             cs.get("source_status"),
-            labels.get(cs.get("final_status"), cs.get("final_status")),
+            label,
             cs.get("manager_name"),
             cs.get("closed_by"),
             cs.get("manager_comment"),
+            "Yes" if in_workbook else "No",
         ])
 
     buf = io.BytesIO()
