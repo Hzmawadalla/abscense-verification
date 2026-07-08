@@ -13,6 +13,7 @@ import streamlit as st
 
 from app import data
 from app.dingtalk import DingTalkClient
+from app.report import build_reconciled_report
 from app.storage import StorageClient, object_path, validate_upload
 from ingestion import loader
 from ingestion.config import load_aliases, load_dingtalk_ids
@@ -22,7 +23,18 @@ from ingestion.summary import ingest_summary
 
 st.set_page_config(page_title="Attendance Verification", page_icon="🗓️", layout="wide")
 
-VERDICTS = {"Present": "present", "On Leave": "leave", "Absent Confirmed": "absent"}
+# Verdict dropdown (label -> stored enum code), shared by the TL page and HRBP override.
+VERDICTS = {
+    "Present": "present",
+    "Annual Leave": "annual_leave",
+    "Unpaid Leave": "unpaid_leave",
+    "Sick Leave": "sick_leave",
+    "Absent": "absent",
+    "Half Day": "half_day",
+}
+# Reverse map for display/export; includes the legacy 'leave' value for any historical rows.
+VERDICT_LABEL = {code: label for label, code in VERDICTS.items()}
+VERDICT_LABEL["leave"] = "On Leave"
 
 
 @st.cache_resource
@@ -106,13 +118,9 @@ def render_tl(token: str):
             verdict = col1.selectbox("Verdict", list(VERDICTS.keys()), index=default, key=f"v{cs['id']}")
             comment = col2.text_input("Comment (evidence, e.g. approved leave email)",
                                       value=cs["manager_comment"] or "", key=f"c{cs['id']}")
-            leave_type = None
-            if VERDICTS[verdict] == "leave":
-                leave_type = col2.text_input("Leave type", value=cs["leave_type"] or "",
-                                             key=f"l{cs['id']}", placeholder="annual / sick / unpaid …")
             upl = col2.file_uploader("Attach proof (pdf/jpg/png)", type=["pdf", "jpg", "jpeg", "png"],
                                      key=f"f{cs['id']}")
-            choices[cs["id"]] = (VERDICTS[verdict], leave_type, comment, upl)
+            choices[cs["id"]] = (VERDICTS[verdict], None, comment, upl)
             st.divider()
         if st.form_submit_button("Submit all", type="primary"):
             actor = f"tl:{mgr['crm']}"
@@ -165,8 +173,8 @@ def render_hrbp():
         st.write(f"Signed in as **{st.session_state.get('name')}**")
         authenticator.logout("Log out", "sidebar")
 
-    tab_dash, tab_ingest, tab_exc, tab_links, tab_close = st.tabs(
-        ["📋 Dashboard", "⬆️ Ingest", "⚠️ Exceptions", "🔗 TL links", "🔒 Period close"])
+    tab_dash, tab_ingest, tab_exc, tab_links, tab_close, tab_export = st.tabs(
+        ["📋 Dashboard", "⬆️ Ingest", "⚠️ Exceptions", "🔗 TL links", "🔒 Period close", "📤 Export"])
     c = conn()
 
     with tab_dash:
@@ -301,6 +309,32 @@ def render_hrbp():
         if st.button("Close the period now", type="primary"):
             n = data.close_open_month(c, actor)
             st.success(f"Closed {n} open case(s) as Absent.")
+
+    with tab_export:
+        st.write("Re-upload this period's attendance workbook to get it back with every **closed** "
+                 "case updated to its final verdict, plus a **Changes** sheet of before → after.")
+        exp_up = st.file_uploader("Attendance report — Summary Report tab (.xlsx)",
+                                  type=["xlsx"], key="exp_wb")
+        exp_year = st.number_input("Year for the date columns", 2024, 2100, 2026, key="exp_year")
+        if exp_up and st.button("Build reconciled report", type="primary"):
+            closed = data.list_closed_cases(c)
+            if not closed:
+                st.warning("No closed cases yet — verify and close cases before exporting.")
+            else:
+                tmp = f"/tmp/{exp_up.name}"
+                with open(tmp, "wb") as f:
+                    f.write(exp_up.getbuffer())
+                try:
+                    xlsx = build_reconciled_report(tmp, closed, VERDICT_LABEL, year=int(exp_year))
+                except (KeyError, ValueError) as e:
+                    st.error(f"Couldn't build the report ({e}). Upload the same workbook that has "
+                             "the **Summary Report** tab.")
+                else:
+                    st.success(f"Reconciled {len(closed)} closed case(s). Download below.")
+                    st.download_button("⬇️ Download reconciled report", data=xlsx,
+                                       file_name="Attendance_Reconciled.xlsx",
+                                       mime="application/vnd.openxmlformats-officedocument."
+                                            "spreadsheetml.sheet")
 
 
 # ============================================================ ROUTER

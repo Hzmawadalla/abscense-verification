@@ -121,6 +121,20 @@ def list_cases(conn, status=None, team=None, manager_id=None):
         return cur.fetchall()
 
 
+def list_closed_cases(conn):
+    """Finalized cases (for the reconciled export): CRM x date x source -> final verdict."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "select e.crm as employee_crm, e.name as employee_name, m.name as manager_name, "
+            "       c.work_date, c.source_status, c.final_status, c.closed_by, c.manager_comment "
+            "from attendance.cases c "
+            "join attendance.employees e on e.id = c.employee_id "
+            "left join attendance.managers m on m.id = c.manager_id "
+            "where c.status = 'closed' and c.final_status is not null "
+            "order by e.crm, c.work_date")
+        return cur.fetchall()
+
+
 def close_case(conn, case_id, actor, final_status=None, final_leave_type=None, comment=None) -> bool:
     """Close a case. final_status=None means 'accept the TL verdict'; else HRBP override."""
     with conn.cursor(row_factory=dict_row) as cur:
