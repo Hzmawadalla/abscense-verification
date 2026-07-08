@@ -213,19 +213,47 @@ def render_hrbp():
             st.caption("No responded cases awaiting resolution.")
 
     with tab_ingest:
-        st.write("Upload the attendance workbook to create this period's cases.")
-        up = st.file_uploader("Workbook (.xlsx)", type=["xlsx"])
+        st.write("Upload this period's workbooks to create verification cases. The **HC** and "
+                 "**Structure** tabs come from the HR export; the **Summary Report** tab comes from "
+                 "the attendance tool. If you have one combined workbook, upload it in either box.")
+        ref_up = st.file_uploader("Reference workbook — HC + Structure tabs (.xlsx)",
+                                  type=["xlsx"], key="ref_wb")
+        att_up = st.file_uploader("Attendance report — Summary Report tab (.xlsx)",
+                                  type=["xlsx"], key="att_wb")
         year = st.number_input("Year for the date columns", 2024, 2100, 2026)
-        if up and st.button("Parse & load", type="primary"):
-            tmp = f"/tmp/{up.name}"
-            with open(tmp, "wb") as f:
-                f.write(up.getbuffer())
-            ref = parse_reference(tmp, aliases=load_aliases())
-            res = ingest_summary(tmp, ref, year=int(year))
+        if st.button("Parse & load", type="primary"):
+            if not (ref_up or att_up):
+                st.warning("Upload at least one workbook.")
+                st.stop()
+            ref_src = ref_up or att_up      # single combined workbook → use it for both
+            att_src = att_up or ref_up
+
+            def _save(uploaded):
+                path = f"/tmp/{uploaded.name}"
+                with open(path, "wb") as f:
+                    f.write(uploaded.getbuffer())
+                return path
+
+            ref_path = _save(ref_src)
+            att_path = ref_path if att_src is ref_src else _save(att_src)
+
+            try:
+                ref = parse_reference(ref_path, aliases=load_aliases())
+            except KeyError as e:
+                st.error(f"The reference workbook is missing a required tab ({e}). It must contain "
+                         "**HC** and **Structure** sheets (from the HR export).")
+                st.stop()
+            try:
+                res = ingest_summary(att_path, ref, year=int(year))
+            except (KeyError, ValueError) as e:
+                st.error(f"The attendance workbook can't be parsed ({e}). It must contain a "
+                         "**Summary Report** sheet (from the attendance tool).")
+                st.stop()
+
             with c:  # one transaction; commits on success
                 db = PsycopgDB(c)
                 loader.load_reference(db, ref)
-                summary = loader.load_ingestion(db, res, reference=ref, source_filename=up.name)
+                summary = loader.load_ingestion(db, res, reference=ref, source_filename=att_src.name)
             applied = data.set_dingtalk_ids(c, load_dingtalk_ids())
             st.success(f"Loaded {summary.cases} cases, {summary.exceptions} exceptions "
                        f"({ref.stats['mapped_employees']}/{ref.stats['employees']} employees mapped)."
