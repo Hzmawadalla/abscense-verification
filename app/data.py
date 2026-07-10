@@ -79,17 +79,20 @@ def open_cases_for_manager(conn, manager_id):
 
 
 def submit_verdict(conn, case_id, manager_status, leave_type, comment, actor) -> bool:
-    """Optimistically write a TL verdict. Returns False if the case was already closed."""
+    """Write a TL verdict once. Returns False if the case is not 'open' (already validated or closed).
+
+    The `where status = 'open'` guard makes validation one-time at the database level, so a reload,
+    double-click, or replayed form cannot overwrite an answer the TL already submitted."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute("select status, manager_status, leave_type, manager_comment "
                     "from attendance.cases where id = %s", (case_id,))
         old = cur.fetchone()
-        if old is None or old["status"] == "closed":
+        if old is None or old["status"] != "open":
             return False
         cur.execute(
             "update attendance.cases set status = 'manager_responded', manager_status = %s, "
             "leave_type = %s, manager_comment = %s, manager_responded_at = now() "
-            "where id = %s and status in ('open','manager_responded')",
+            "where id = %s and status = 'open'",
             (manager_status, leave_type, comment, case_id))
         if cur.rowcount == 0:
             conn.rollback()

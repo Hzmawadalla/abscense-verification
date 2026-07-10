@@ -116,51 +116,66 @@ def render_tl(token: str):
         st.caption(thanks)
 
     cases = data.open_cases_for_manager(c, mgr["id"])
+    pending = [cs for cs in cases if cs["status"] == "open"]        # not yet validated — editable
+    done = [cs for cs in cases if cs["status"] == "manager_responded"]  # validated once — locked
     if not cases:
         st.success("You're all caught up — no open cases. Thank you!")
         return
 
-    st.write(f"**{len(cases)}** case(s) awaiting your confirmation.")
-    with st.form("verify"):
-        choices = {}
-        for cs in cases:
+    if pending:
+        st.write(f"**{len(pending)}** case(s) awaiting your confirmation. "
+                 "Each can be submitted **once** — review carefully before submitting.")
+        with st.form("verify"):
+            choices = {}
+            for cs in pending:
+                hd = " · ½ day" if cs["is_half_day"] else ""
+                st.markdown(f"**{cs['employee_name']}** — {cs['work_date']} · flagged as "
+                            f"*{cs['source_status']}*{hd}")
+                col1, col2 = st.columns([1, 2])
+                verdict = col1.selectbox("Verdict", list(VERDICTS.keys()), key=f"v{cs['id']}")
+                comment = col2.text_input("Comment (evidence, e.g. approved leave email)",
+                                          key=f"c{cs['id']}")
+                upl = col2.file_uploader("Attach proof (pdf/jpg/png)", type=["pdf", "jpg", "jpeg", "png"],
+                                         key=f"f{cs['id']}")
+                choices[cs["id"]] = (VERDICTS[verdict], None, comment, upl)
+                st.divider()
+            if st.form_submit_button("Submit all", type="primary"):
+                actor = f"tl:{mgr['crm']}"
+                sc = storage_client()
+                ok = stale = files = 0
+                for cid, (ms, lt, cm, upl) in choices.items():
+                    if not data.submit_verdict(c, cid, ms, lt, cm, actor):
+                        stale += 1  # already validated or closed since the page loaded
+                        continue
+                    ok += 1
+                    if upl is not None and sc is not None:
+                        try:
+                            validate_upload(upl.type, upl.size)
+                            path = sc.upload(object_path(cid, upl.name), upl.getvalue(), upl.type)
+                            data.add_attachment(c, cid, path, upl.name, upl.type, upl.size)
+                            files += 1
+                        except Exception as e:  # noqa: BLE001 — show the TL why an attachment didn't stick
+                            st.warning(f"Attachment for one case failed: {e}")
+                msg = f"Saved {ok} response(s)."
+                msg += f" {files} attachment(s)." if files else ""
+                msg += f" {stale} were already submitted or closed." if stale else ""
+                st.session_state["tl_thanks"] = msg  # shown after the rerun (see top of render_tl)
+                st.rerun()
+    else:
+        st.success("You've validated all your cases — thank you!")
+
+    if done:
+        st.divider()
+        st.subheader("✓ Already submitted (locked)")
+        st.caption("These are locked to one submission each — contact HR if a correction is needed.")
+        for cs in done:
             hd = " · ½ day" if cs["is_half_day"] else ""
-            st.markdown(f"**{cs['employee_name']}** — {cs['work_date']} · flagged as "
-                        f"*{cs['source_status']}*{hd}")
-            col1, col2 = st.columns([1, 2])
-            default = 0
-            if cs["manager_status"]:
-                order = list(VERDICTS.values())
-                default = order.index(cs["manager_status"]) if cs["manager_status"] in order else 0
-            verdict = col1.selectbox("Verdict", list(VERDICTS.keys()), index=default, key=f"v{cs['id']}")
-            comment = col2.text_input("Comment (evidence, e.g. approved leave email)",
-                                      value=cs["manager_comment"] or "", key=f"c{cs['id']}")
-            upl = col2.file_uploader("Attach proof (pdf/jpg/png)", type=["pdf", "jpg", "jpeg", "png"],
-                                     key=f"f{cs['id']}")
-            choices[cs["id"]] = (VERDICTS[verdict], None, comment, upl)
-            st.divider()
-        if st.form_submit_button("Submit all", type="primary"):
-            actor = f"tl:{mgr['crm']}"
-            sc = storage_client()
-            ok = stale = files = 0
-            for cid, (ms, lt, cm, upl) in choices.items():
-                if not data.submit_verdict(c, cid, ms, lt, cm, actor):
-                    stale += 1
-                    continue
-                ok += 1
-                if upl is not None and sc is not None:
-                    try:
-                        validate_upload(upl.type, upl.size)
-                        path = sc.upload(object_path(cid, upl.name), upl.getvalue(), upl.type)
-                        data.add_attachment(c, cid, path, upl.name, upl.type, upl.size)
-                        files += 1
-                    except Exception as e:  # noqa: BLE001 — show the TL why an attachment didn't stick
-                        st.warning(f"Attachment for one case failed: {e}")
-            msg = f"Saved {ok} response(s)."
-            msg += f" {files} attachment(s)." if files else ""
-            msg += f" {stale} were already closed by HR." if stale else ""
-            st.session_state["tl_thanks"] = msg  # shown after the rerun (see top of render_tl)
-            st.rerun()
+            verdict = VERDICT_LABEL.get(cs["manager_status"], cs["manager_status"] or "—")
+            line = (f"**{cs['employee_name']}** — {cs['work_date']} · flagged *{cs['source_status']}*{hd} "
+                    f"→ **{verdict}**")
+            if cs["manager_comment"]:
+                line += f" · _{cs['manager_comment']}_"
+            st.markdown(line)
 
 
 # ============================================================ HRBP LAYER (login)
