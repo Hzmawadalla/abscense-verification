@@ -106,6 +106,12 @@ def render_tl(token: str):
 
     st.title("Attendance Verification")
     st.caption(f"Team Leader: **{mgr['name'] or mgr['crm']}** — please confirm each flagged day for your team.")
+
+    thanks = st.session_state.pop("tl_thanks", None)  # set on the previous run, survives the rerun
+    if thanks:
+        st.success("✅ Thanks for your submission!")
+        st.caption(thanks)
+
     cases = data.open_cases_for_manager(c, mgr["id"])
     if not cases:
         st.success("You're all caught up — no open cases. Thank you!")
@@ -150,7 +156,7 @@ def render_tl(token: str):
             msg = f"Saved {ok} response(s)."
             msg += f" {files} attachment(s)." if files else ""
             msg += f" {stale} were already closed by HR." if stale else ""
-            st.success(msg)
+            st.session_state["tl_thanks"] = msg  # shown after the rerun (see top of render_tl)
             st.rerun()
 
 
