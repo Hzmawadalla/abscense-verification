@@ -109,7 +109,10 @@ def render_tl(token: str):
 
     thanks = st.session_state.pop("tl_thanks", None)  # set on the previous run, survives the rerun
     if thanks:
-        st.success("✅ Thanks for your submission!")
+        parts = (mgr["name"] or mgr["crm"] or "").split()
+        first = parts[0] if parts else ""
+        st.success(f"✅ Thanks, {first}! Your submission has been recorded." if first
+                   else "✅ Thanks for your submission!")
         st.caption(thanks)
 
     cases = data.open_cases_for_manager(c, mgr["id"])
