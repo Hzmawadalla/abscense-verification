@@ -215,7 +215,7 @@ def managers_overview(conn):
     """Each active TL with their open-case count, DingTalk userid, and whether a link exists."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "select m.id, m.crm, m.name, m.dingtalk_userid, "
+            "select m.id, m.crm, m.name, m.email, m.dingtalk_userid, "
             "       (m.access_token_hash is not null) as has_link, "
             "       count(c.id) filter (where c.status in ('open','manager_responded')) as open_cases "
             "from attendance.managers m "

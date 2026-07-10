@@ -13,6 +13,7 @@ import streamlit as st
 
 from app import data
 from app.dingtalk import DingTalkClient
+from app.mailer import SMTPMailer
 from app.report import build_reconciled_report
 from app.storage import StorageClient, object_path, validate_upload
 from ingestion import loader
@@ -82,6 +83,17 @@ def storage_client():
     return StorageClient(url, key)
 
 
+def mailer_client():
+    host = st.secrets.get("SMTP_HOST", os.environ.get("SMTP_HOST"))
+    user = st.secrets.get("SMTP_USER", os.environ.get("SMTP_USER"))
+    pw = st.secrets.get("SMTP_PASSWORD", os.environ.get("SMTP_PASSWORD"))
+    sender = st.secrets.get("MAIL_FROM", os.environ.get("MAIL_FROM"))
+    if not (host and user and pw and sender):
+        return None
+    port = st.secrets.get("SMTP_PORT", os.environ.get("SMTP_PORT", "587"))
+    return SMTPMailer(host, port, user, pw, sender)
+
+
 def send_tl_link(c, client, mgr, base):
     """Rotate a link and DM it to the TL over DingTalk; record the attempt either way."""
     token = data.generate_manager_link(c, mgr["id"])
@@ -93,6 +105,20 @@ def send_tl_link(c, client, mgr, base):
         return True, None
     except Exception as e:  # noqa: BLE001 — surface any dispatch failure, never silently drop
         data.record_notification(c, mgr["id"], "dingtalk", mgr["open_cases"], "failed", error=str(e))
+        return False, str(e)
+
+
+def send_tl_email(c, mailer, mgr, base, smtp=None):
+    """Rotate a link and email it to the TL; record the attempt either way. Pass an open `smtp`
+    session to reuse one connection across a batch."""
+    token = data.generate_manager_link(c, mgr["id"])
+    link = f"{base}/?t={token}"
+    try:
+        mailer.send_link(mgr["email"], mgr["name"], link, mgr["open_cases"], smtp=smtp)
+        data.record_notification(c, mgr["id"], "email", mgr["open_cases"], "sent")
+        return True, None
+    except Exception as e:  # noqa: BLE001 — surface any dispatch failure, never silently drop
+        data.record_notification(c, mgr["id"], "email", mgr["open_cases"], "failed", error=str(e))
         return False, str(e)
 
 
@@ -305,15 +331,35 @@ def render_hrbp():
         st.dataframe(exc, use_container_width=True, hide_index=True)
 
     with tab_links:
-        st.write("Generate each TL's unique link and DM it via DingTalk.")
+        st.write("Generate each TL's unique link and send it — by **email**, DingTalk, or copy manually.")
         base = st.text_input("App base URL", st.secrets.get("APP_BASE_URL", "https://your-app.streamlit.app"))
         client = dingtalk_client()
-        if client is None:
-            st.warning("DingTalk not configured (DINGTALK_APP_KEY / _SECRET / _AGENT_ID). "
-                       "You can still generate links to copy manually.")
+        mailer = mailer_client()
+        if mailer is None:
+            st.info("📧 Email not configured. Add SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASSWORD / "
+                    "MAIL_FROM to Secrets (e.g. Brevo's SMTP relay) to enable one-click email sending.")
         overview = data.managers_overview(c)
+        emailable = [m for m in overview if m["open_cases"] and m.get("email")]
+        no_email = [m for m in overview if m["open_cases"] and not m.get("email")]
 
-        if client and st.button("📨 Send to ALL TLs with open cases", type="primary"):
+        bulk = st.columns(2)
+        if mailer and bulk[0].button(f"📧 Email links to all TLs with open cases ({len(emailable)})",
+                                     type="primary", disabled=not emailable):
+            sent = fail = 0
+            try:
+                with mailer.connect() as smtp:  # one login reused for the whole batch
+                    for mgr in emailable:
+                        ok, _ = send_tl_email(c, mailer, mgr, base, smtp=smtp)
+                        sent += ok
+                        fail += (not ok)
+            except Exception as e:  # noqa: BLE001 — mail-server connection/login failure
+                st.error(f"Couldn't connect to the mail server — check the SMTP secrets. ({e})")
+            else:
+                msg = f"Email: sent {sent}, failed {fail}."
+                if no_email:
+                    msg += f" {len(no_email)} TL(s) skipped — no email on file."
+                (st.success if not fail else st.warning)(msg)
+        if client and bulk[1].button("📨 DingTalk to all TLs with open cases"):
             sent = fail = 0
             for mgr in overview:
                 if mgr["dingtalk_userid"] and mgr["open_cases"]:
@@ -321,18 +367,21 @@ def render_hrbp():
                     sent += ok
                     fail += (not ok)
             st.success(f"DingTalk: sent {sent}, failed {fail}.")
+        if no_email:
+            st.caption(f"⚠️ {len(no_email)} TL with open cases have no email on file — use their **Link** "
+                       "button to copy and send manually.")
 
         for mgr in overview:
-            cols = st.columns([3, 1, 1, 3])
-            uid = mgr["dingtalk_userid"] or "— no userid —"
-            cols[0].write(f"**{mgr['name'] or mgr['crm']}** · {mgr['open_cases']} open · dingtalk: `{uid}`")
+            cols = st.columns([4, 1, 1, 3])
+            email = mgr.get("email") or "— no email —"
+            cols[0].write(f"**{mgr['name'] or mgr['crm']}** · {mgr['open_cases']} open · {email}")
             if cols[1].button("Link", key=f"gl{mgr['id']}"):
                 tok = data.generate_manager_link(c, mgr["id"])
                 st.session_state[f"link{mgr['id']}"] = f"{base}/?t={tok}"
-            can_send = bool(client and mgr["dingtalk_userid"] and mgr["open_cases"])
-            if cols[2].button("Send", key=f"snd{mgr['id']}", disabled=not can_send):
-                ok, err = send_tl_link(c, client, mgr, base)
-                st.success(f"Sent to {mgr['name']}.") if ok else st.error(f"Failed: {err}")
+            can_email = bool(mailer and mgr.get("email") and mgr["open_cases"])
+            if cols[2].button("Email", key=f"eml{mgr['id']}", disabled=not can_email):
+                ok, err = send_tl_email(c, mailer, mgr, base)
+                st.success(f"Emailed {mgr['name']}.") if ok else st.error(f"Failed: {err}")
             if st.session_state.get(f"link{mgr['id']}"):
                 cols[3].code(st.session_state[f"link{mgr['id']}"], language=None)
 
