@@ -283,6 +283,8 @@ def render_hrbp():
         st.write("Upload this period's workbooks to create verification cases. The **HC** and "
                  "**Structure** tabs come from the HR export; the **Summary Report** tab comes from "
                  "the attendance tool. If you have one combined workbook, upload it in either box.")
+        st.caption("⚠️ Fix TL mapping in **Structure** (and clear Exceptions) *before* sending links — "
+                   "a case's TL is set when it's created and won't change on re-ingest.")
         ref_up = st.file_uploader("Reference workbook — HC + Structure tabs (.xlsx)",
                                   type=["xlsx"], key="ref_wb")
         att_up = st.file_uploader("Attendance report — Summary Report tab (.xlsx)",
@@ -333,6 +335,8 @@ def render_hrbp():
 
     with tab_links:
         st.write("Generate each TL's unique link and send it — by **email**, DingTalk, or copy manually.")
+        st.caption("⚠️ Send each link **once**. Generating a new link — or re-preparing the download — "
+                   "rotates that TL's token and invalidates any link you already sent.")
         base = st.text_input("App base URL", st.secrets.get("APP_BASE_URL", "https://your-app.streamlit.app"))
         client = dingtalk_client()
         mailer = mailer_client()

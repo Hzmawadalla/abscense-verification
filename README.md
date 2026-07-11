@@ -4,7 +4,9 @@ Parses the monthly attendance workbook, creates verification **cases** for dispu
 attendance days, lets **Team Leaders** confirm/correct them via a persistent per-TL web page,
 and lets **HRBP** close or override before the results merge back into payroll.
 
-See [`SPEC.md`](./SPEC.md) for the full design contract.
+See [`SPEC.md`](./SPEC.md) for the full design contract, and
+[`51 Talk Attendance verification.md`](./51%20Talk%20Attendance%20verification.md) for the
+HRBP monthly runbook (workflow + operational rules).
 
 ## Status
 
