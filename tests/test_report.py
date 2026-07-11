@@ -4,7 +4,7 @@ import io
 
 import openpyxl
 
-from app.report import build_reconciled_report
+from app.report import build_links_workbook, build_reconciled_report
 
 LABELS = {"absent": "Absent", "annual_leave": "Annual Leave", "present": "Present"}
 
@@ -82,6 +82,16 @@ def test_case_not_in_workbook_is_flagged_no_and_not_written(tmp_path):
     changes = list(wb["Changes"].iter_rows(values_only=True))
     assert changes[1][0] == "EGLP-esraamahmoud"
     assert changes[1][8] == "No"
+
+
+def test_links_workbook_has_header_and_rows():
+    rows = [{"name": "Ahmed", "crm": "TL-A", "email": "a@x.com", "open_cases": 3,
+             "link": "https://app/?t=abc"}]
+    data = build_links_workbook(rows)
+    ws = openpyxl.load_workbook(io.BytesIO(data))["TL links"]
+    r = list(ws.iter_rows(values_only=True))
+    assert r[0] == ("TL name", "CRM", "Email", "Open cases", "Link")
+    assert r[1] == ("Ahmed", "TL-A", "a@x.com", 3, "https://app/?t=abc")
 
 
 def test_missing_crm_column_raises(tmp_path):

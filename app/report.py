@@ -22,6 +22,7 @@ CHANGES_SHEET = "Changes"
 MATRIX_SHEET_HINT = "Summary Report"
 CHANGES_HEADER = ["CRM", "Employee", "Date", "Before", "After", "TL", "Closed by", "Comment",
                   "In workbook?"]
+LINKS_HEADER = ["TL name", "CRM", "Email", "Open cases", "Link"]
 
 
 def _locate_header(ws):
@@ -89,6 +90,21 @@ def build_reconciled_report(matrix_path, closed_cases, labels, year,
             "Yes" if in_workbook else "No",
         ])
 
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def build_links_workbook(rows) -> bytes:
+    """One-sheet .xlsx of TL links for manual distribution (mail-merge / copy).
+    rows: iterable of dicts with keys name, crm, email, open_cases, link."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "TL links"
+    ws.append(LINKS_HEADER)
+    for r in rows:
+        ws.append([r.get("name"), r.get("crm"), r.get("email"),
+                   r.get("open_cases"), r.get("link")])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()

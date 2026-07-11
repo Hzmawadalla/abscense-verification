@@ -14,7 +14,7 @@ import streamlit as st
 from app import data
 from app.dingtalk import DingTalkClient
 from app.mailer import SMTPMailer
-from app.report import build_reconciled_report
+from app.report import build_links_workbook, build_reconciled_report
 from app.storage import StorageClient, object_path, validate_upload
 from ingestion import loader
 from ingestion.config import load_aliases, load_dingtalk_ids
@@ -371,6 +371,25 @@ def render_hrbp():
         if no_email:
             st.caption(f"⚠️ {len(no_email)} TL with open cases have no email on file — use their **Link** "
                        "button to copy and send manually.")
+
+        # Bulk download for manual distribution (mail-merge / copy) — no email or DingTalk needed.
+        with_open = [m for m in overview if m["open_cases"]]
+        if st.button(f"⬇️ Prepare all TL links for download ({len(with_open)} with open cases)",
+                     disabled=not with_open):
+            link_rows = []
+            for mgr in with_open:
+                tok = data.generate_manager_link(c, mgr["id"])
+                link_rows.append({"name": mgr["name"] or mgr["crm"], "crm": mgr["crm"],
+                                  "email": mgr.get("email"), "open_cases": mgr["open_cases"],
+                                  "link": f"{base}/?t={tok}"})
+            st.session_state["links_xlsx"] = build_links_workbook(link_rows)
+            st.session_state["links_n"] = len(link_rows)
+        if st.session_state.get("links_xlsx"):
+            st.download_button(f"⬇️ Download TL_links.xlsx ({st.session_state.get('links_n', 0)} TLs)",
+                               data=st.session_state["links_xlsx"], file_name="TL_links.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.caption("These are now the current valid links — distribute this file; preparing again "
+                       "rotates the tokens and invalidates them.")
 
         for mgr in overview:
             cols = st.columns([4, 1, 1, 3])
