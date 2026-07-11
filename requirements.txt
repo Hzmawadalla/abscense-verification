@@ -1,7 +1,18 @@
-openpyxl>=3.1.5
-psycopg[binary]>=3.3
-streamlit>=1.59
-streamlit-authenticator>=0.4
-bcrypt>=4.1
-requests>=2.31
+# Direct dependencies — pinned to known-good versions. A loose (`>=`) resolve on Streamlit
+# Community Cloud pulled newer compiled wheels that segfaulted (native crash in st.dataframe's
+# pyarrow/numpy/pandas stack), so the compiled packages below are pinned exactly.
+openpyxl==3.1.5
+psycopg[binary]==3.3.4
+streamlit==1.59.0
+streamlit-authenticator==0.4.2
+bcrypt==5.0.0
+requests==2.34.2
 pytest>=8.0
+
+# Compiled stack — pin exactly so the cloud installs the same binaries that work locally.
+numpy==2.5.1
+pandas==3.0.3
+pyarrow==24.0.0
+pillow==12.3.0
+cryptography==49.0.0
+protobuf==7.35.1
