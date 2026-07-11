@@ -15,11 +15,23 @@ def norm_header(h) -> str:
     return " ".join(str(h).replace("\n", " ").split()).strip().lower()
 
 
+def resolve_sheet(wb, name):
+    """Return the actual worksheet name matching `name`, tolerating surrounding whitespace and
+    case (real HR exports often ship a tab like 'Structure ' with a trailing space)."""
+    if name in wb.sheetnames:
+        return name
+    target = str(name).strip().lower()
+    for s in wb.sheetnames:
+        if s.strip().lower() == target:
+            return s
+    raise KeyError(f"Worksheet {name} does not exist.")
+
+
 def read_dicts(path, sheet, header_row=1):
     """Return (headers, rows) where each row is a dict keyed by normalized header (first wins)."""
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
-        ws = wb[sheet]
+        ws = wb[resolve_sheet(wb, sheet)]
         raw = list(ws.iter_rows(min_row=1, values_only=True))
     finally:
         wb.close()

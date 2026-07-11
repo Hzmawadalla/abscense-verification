@@ -13,7 +13,7 @@ import openpyxl
 
 from .reference import _clean, _is_junk_crm, _key
 from .status_rules import classify
-from .workbook import norm_header
+from .workbook import norm_header, resolve_sheet
 
 _MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1)}
@@ -73,7 +73,7 @@ def ingest_summary(path, reference, year, sheet="Summary Report", header_row=3):
 
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     try:
-        ws = wb[sheet]
+        ws = wb[resolve_sheet(wb, sheet)]
         all_rows = list(ws.iter_rows(min_row=1, values_only=True))
     finally:
         wb.close()

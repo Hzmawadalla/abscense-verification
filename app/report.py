@@ -16,7 +16,7 @@ import openpyxl
 
 from ingestion.reference import _clean, _key
 from ingestion.summary import parse_day_header
-from ingestion.workbook import norm_header
+from ingestion.workbook import norm_header, resolve_sheet
 
 CHANGES_SHEET = "Changes"
 MATRIX_SHEET_HINT = "Summary Report"
@@ -43,7 +43,10 @@ def build_reconciled_report(matrix_path, closed_cases, labels, year,
     labels: {verdict_code: human_label}. Returns the .xlsx as bytes."""
     closed_cases = list(closed_cases)
     wb = openpyxl.load_workbook(matrix_path)  # writable (not read_only) so cells can be overwritten
-    ws = wb[sheet] if sheet in wb.sheetnames else wb[wb.sheetnames[0]]
+    try:
+        ws = wb[resolve_sheet(wb, sheet)]
+    except KeyError:
+        ws = wb[wb.sheetnames[0]]
 
     hdr_row, crm_col, header_vals = _locate_header(ws)
     if hdr_row is None:
