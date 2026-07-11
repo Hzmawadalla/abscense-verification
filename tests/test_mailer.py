@@ -18,6 +18,13 @@ def test_message_handles_missing_tl_name():
     assert "Hi there," in body
 
 
+def test_reply_to_is_set_when_provided():
+    msg = build_message("s@x.com", "tl@x.com", "A", "link", 1, reply_to="eg-hra@51talk.com")
+    assert msg["Reply-To"] == "eg-hra@51talk.com"
+    # and omitted when not provided
+    assert build_message("s@x.com", "tl@x.com", "A", "link", 1)["Reply-To"] is None
+
+
 def test_mailer_coerces_port_to_int():
     m = SMTPMailer("smtp-relay.brevo.com", "587", "user", "key", "hr@x.com")
     assert m.port == 587 and isinstance(m.port, int)

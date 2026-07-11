@@ -11,10 +11,12 @@ from email.message import EmailMessage
 SUBJECT = "Attendance verification — please confirm your team's flagged days"
 
 
-def build_message(sender, to_email, tl_name, link, open_cases) -> EmailMessage:
+def build_message(sender, to_email, tl_name, link, open_cases, reply_to=None) -> EmailMessage:
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = to_email
+    if reply_to:
+        msg["Reply-To"] = reply_to  # e.g. the HR mailbox, so replies route there not to the sender
     msg["Subject"] = SUBJECT
     msg.set_content(
         f"Hi {tl_name or 'there'},\n\n"
@@ -28,12 +30,13 @@ def build_message(sender, to_email, tl_name, link, open_cases) -> EmailMessage:
 
 
 class SMTPMailer:
-    def __init__(self, host, port, user, password, sender):
+    def __init__(self, host, port, user, password, sender, reply_to=None):
         self.host = host
         self.port = int(port)
         self.user = user
         self.password = password
         self.sender = sender
+        self.reply_to = reply_to
 
     def connect(self) -> smtplib.SMTP:
         """Open an authenticated STARTTLS session. Use as `with mailer.connect() as smtp:` for a
@@ -46,7 +49,7 @@ class SMTPMailer:
     def send_link(self, to_email, tl_name, link, open_cases, smtp=None) -> None:
         """Send one TL their unique link. Reuses `smtp` if given, else opens a one-off connection.
         Raises on failure so the caller can record the outcome per recipient."""
-        msg = build_message(self.sender, to_email, tl_name, link, open_cases)
+        msg = build_message(self.sender, to_email, tl_name, link, open_cases, reply_to=self.reply_to)
         if smtp is not None:
             smtp.send_message(msg)
         else:

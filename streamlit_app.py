@@ -91,7 +91,8 @@ def mailer_client():
     if not (host and user and pw and sender):
         return None
     port = st.secrets.get("SMTP_PORT", os.environ.get("SMTP_PORT", "587"))
-    return SMTPMailer(host, port, user, pw, sender)
+    reply_to = st.secrets.get("MAIL_REPLY_TO", os.environ.get("MAIL_REPLY_TO"))
+    return SMTPMailer(host, port, user, pw, sender, reply_to=reply_to)
 
 
 def send_tl_link(c, client, mgr, base):
