@@ -178,6 +178,15 @@ def close_open_month(conn, actor) -> int:
     return len(ids)
 
 
+def list_reference_gaps(conn):
+    """Undated exceptions = HC/Structure completeness gaps (staff not producing verifiable cases)."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("select distinct crm, reason, raw_value as detail "
+                    "from attendance.ingestion_exceptions "
+                    "where work_date is null and resolved = false order by reason, crm")
+        return cur.fetchall()
+
+
 def list_exceptions(conn, resolved=False):
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute("select id, crm, work_date, raw_value, reason, resolved, created_at "

@@ -94,6 +94,16 @@ def test_links_workbook_has_header_and_rows():
     assert r[1] == ("Ahmed", "TL-A", "a@x.com", 3, "https://app/?t=abc")
 
 
+def test_staff_not_in_attendance_sheet(tmp_path):
+    gaps = [{"crm": "51x", "reason": "unmapped_employee", "detail": "no Structure row"}]
+    out = build_reconciled_report(_make_matrix(tmp_path), _closed(), LABELS, year=2026, staff_gaps=gaps)
+    wb = openpyxl.load_workbook(io.BytesIO(out))
+    assert "Staff not in Attendance" in wb.sheetnames
+    rows = list(wb["Staff not in Attendance"].iter_rows(values_only=True))
+    assert rows[0] == ("CRM", "Reason", "Detail")
+    assert rows[1] == ("51x", "unmapped_employee", "no Structure row")
+
+
 def test_missing_crm_column_raises(tmp_path):
     wb = openpyxl.Workbook()
     wb.active.append(["Employee", "15-Jun"])

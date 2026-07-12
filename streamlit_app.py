@@ -328,8 +328,13 @@ def render_hrbp():
 
     with tab_exc:
         exc = data.list_exceptions(c, resolved=False)
-        st.write(f"**{len(exc)}** open exception(s) — the 'fix Structure' + data-quality worklist.")
-        st.dataframe(exc, use_container_width=True, hide_index=True)
+        actionable = [e for e in exc if e.get("work_date") is not None]  # attendance-day problems
+        gaps = len(exc) - len(actionable)                                 # HC/Structure gaps (no date)
+        st.write(f"**{len(actionable)}** attendance exception(s) to work — the day-level worklist.")
+        if gaps:
+            st.caption(f"➕ {gaps} reference/'Staff not in Attendance' item(s) (no date) are excluded "
+                       "here and exported on the **Staff not in Attendance** sheet in 📤 Export.")
+        st.dataframe(actionable, use_container_width=True, hide_index=True)
 
     with tab_links:
         st.write("Generate each TL's unique link and send it — by **email**, DingTalk, or copy manually.")
@@ -431,7 +436,8 @@ def render_hrbp():
                 with open(tmp, "wb") as f:
                     f.write(exp_up.getbuffer())
                 try:
-                    xlsx = build_reconciled_report(tmp, closed, VERDICT_LABEL, year=int(exp_year))
+                    xlsx = build_reconciled_report(tmp, closed, VERDICT_LABEL, year=int(exp_year),
+                                                   staff_gaps=data.list_reference_gaps(c))
                 except (KeyError, ValueError) as e:
                     st.error(f"Couldn't build the report ({e}). Upload the same workbook that has "
                              "the **Summary Report** tab.")

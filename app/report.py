@@ -38,7 +38,7 @@ def _locate_header(ws):
 
 
 def build_reconciled_report(matrix_path, closed_cases, labels, year,
-                            sheet=MATRIX_SHEET_HINT) -> bytes:
+                            sheet=MATRIX_SHEET_HINT, staff_gaps=None) -> bytes:
     """closed_cases: iterable of dicts with keys employee_crm, employee_name, manager_name,
     work_date (date), source_status, final_status (verdict code), closed_by, manager_comment.
     labels: {verdict_code: human_label}. Returns the .xlsx as bytes."""
@@ -89,6 +89,12 @@ def build_reconciled_report(matrix_path, closed_cases, labels, year,
             cs.get("manager_comment"),
             "Yes" if in_workbook else "No",
         ])
+
+    if staff_gaps:  # HC/Structure completeness gaps — staff not producing verifiable cases
+        sg = wb.create_sheet("Staff not in Attendance")
+        sg.append(["CRM", "Reason", "Detail"])
+        for r in staff_gaps:
+            sg.append([r.get("crm"), r.get("reason"), r.get("detail")])
 
     buf = io.BytesIO()
     wb.save(buf)
