@@ -7,6 +7,7 @@ Two access layers, routed at entry:
 Run locally:  SUPABASE_DB_URL=postgresql://... streamlit run streamlit_app.py
 On Streamlit Community Cloud, set SUPABASE_DB_URL (and cookie secrets) in the app's Secrets.
 """
+# Deploy marker: 2026-07-12 — force Community Cloud to rebuild onto the Line-Manager mapping.
 import os
 
 import streamlit as st
