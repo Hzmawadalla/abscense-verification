@@ -78,12 +78,20 @@ ACTIVE_SUMMARY_ROWS = [
 ]
 
 
-def _build_active(wb):
+# A manager referenced by an employee whose 'Line Manager' NAME cell is blank while the ID and
+# email columns are populated — the exact shape that leaks an id/email in as the manager's name.
+BLANK_LM_ROWS = [
+    ["BOSS", "7000", "Big Boss", "boss@x.com", "EA", "Active", None, None, None, None],
+    ["W-1", "2001", "Worker", "w1@x.com", "EA", "Active", None, "", "7000", "boss@x.com"],
+]
+
+
+def _build_active(wb, rows=ACTIVE_ROWS):
     ws = wb.active
     ws.title = "All Active Employees"
     ws.append(ACTIVE_CODES)
     ws.append(ACTIVE_HEADERS)
-    for r in ACTIVE_ROWS:
+    for r in rows:
         ws.append(r)
 
 
@@ -92,6 +100,15 @@ def active_employees_workbook(tmp_path):
     wb = openpyxl.Workbook()
     _build_active(wb)
     path = tmp_path / "active.xlsx"
+    wb.save(path)
+    return str(path)
+
+
+@pytest.fixture
+def blank_lm_name_workbook(tmp_path):
+    wb = openpyxl.Workbook()
+    _build_active(wb, rows=BLANK_LM_ROWS)
+    path = tmp_path / "blank_lm.xlsx"
     wb.save(path)
     return str(path)
 

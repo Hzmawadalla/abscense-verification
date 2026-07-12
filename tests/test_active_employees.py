@@ -58,6 +58,17 @@ def test_junk_crm_row_is_skipped(active_employees_workbook):
     assert "N/A" not in _by_crm(ref.managers)
 
 
+def test_blank_line_manager_name_does_not_leak_id_or_email(blank_lm_name_workbook):
+    # When the 'Line Manager' name cell is blank, the manager's name must not fall through to the
+    # adjacent 'Line Manager Employee ID'/'Line Manager Email' columns. Mapping (by ID) still holds.
+    ref = parse_active_employees(blank_lm_name_workbook)
+    emps = _by_crm(ref.employees)
+    mgrs = _by_crm(ref.managers)
+    assert emps["W-1"].manager_crm == "BOSS"
+    assert mgrs["BOSS"].name not in {"7000", "boss@x.com"}
+    assert mgrs["BOSS"].name is None
+
+
 # --- parse_reference_any: format dispatch ---
 
 def test_dispatch_selects_active_format(active_employees_workbook):

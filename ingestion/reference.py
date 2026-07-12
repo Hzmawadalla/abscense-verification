@@ -127,7 +127,10 @@ def parse_active_employees(path):
             continue
         seen.add(_key(crm))
         lm_id = _clean(pick(row, "line manager employee id"))
-        lm_name = _clean(pick(row, "line manager"))
+        # Read the manager name by exact header only: pick()'s prefix fallback would match
+        # 'line manager employee id' / 'line manager email' when this cell is blank, leaking the
+        # id or email in as the manager's name.
+        lm_name = _clean(row.get("line manager"))
         lm_email = _clean(pick(row, "line manager email"))
         mgr_crm = id_to_crm.get(lm_id) if lm_id else None
         if mgr_crm and _key(mgr_crm) != _key(crm):
