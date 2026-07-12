@@ -48,6 +48,69 @@ SUMMARY_ROWS = [
 ]
 
 
+# 'All Active Employees' single-sheet export: row 1 = system codes, row 2 = human headers,
+# each row an employee carrying their own Line Manager (resolved to a CRM via Employee ID).
+ACTIVE_CODES = ["sys_crm", "sys_empid", "sys_name", "sys_email", "sys_dept",
+                "sys_status", "sys_lwd", "sys_lm", "sys_lmid", "sys_lmemail"]
+ACTIVE_HEADERS = ["CRM account", "Employee ID", "Name", "Email", "Department",
+                  "Employee Status", "Last Working Day", "Line Manager",
+                  "Line Manager Employee ID", "Line Manager Email"]
+ACTIVE_ROWS = [
+    # A top manager: no line manager of their own -> unmapped as an employee, but verifies others.
+    ["MGR-1", "9001", "Manager One", "mgr1@x.com", "EA", "Active", None, None, None, None],
+    ["A-1", "1001", "Alpha", "a1@x.com", "EA", "Active", None,
+     "Manager One", "9001", "mgr1@x.com"],
+    ["A-2", "1002", "Beta",  "a2@x.com", "EA", "Active", datetime.datetime(2026, 5, 7),
+     "Manager One", "9001", "mgr1@x.com"],
+    # Line manager (id 8888) is not present in the file -> employee cannot be mapped.
+    ["A-3", "1003", "Gamma", "a3@x.com", "CC", "Active", None,
+     "Ghost Mgr", "8888", "ghost@x.com"],
+    # Junk CRM -> skipped entirely (not an employee, not a manager).
+    ["N/A", "1099", "Junk",  "j@x.com",  "Admin", "Active", None,
+     "Manager One", "9001", "mgr1@x.com"],
+]
+
+# Summary matrix for the active-format fixture: row1 title, row2 blank, row3 headers, row4+ data.
+ACTIVE_SUMMARY_HEADERS = ["CRM", "Normal Days", "Abnormal Days", "06-May", "07-May", "08-May"]
+ACTIVE_SUMMARY_ROWS = [
+    ["A-1", 20, 1, "Absent", "Normal", "Normal"],
+    ["A-2", 18, 3, "Absent", "Absent", "Absent"],  # 08-May falls after A-2's last working day
+]
+
+
+def _build_active(wb):
+    ws = wb.active
+    ws.title = "All Active Employees"
+    ws.append(ACTIVE_CODES)
+    ws.append(ACTIVE_HEADERS)
+    for r in ACTIVE_ROWS:
+        ws.append(r)
+
+
+@pytest.fixture
+def active_employees_workbook(tmp_path):
+    wb = openpyxl.Workbook()
+    _build_active(wb)
+    path = tmp_path / "active.xlsx"
+    wb.save(path)
+    return str(path)
+
+
+@pytest.fixture
+def active_employees_with_summary_workbook(tmp_path):
+    wb = openpyxl.Workbook()
+    _build_active(wb)
+    sm = wb.create_sheet("Summary Report")
+    sm.append(["Enhanced Attendance Summary Report"])
+    sm.append([])
+    sm.append(ACTIVE_SUMMARY_HEADERS)
+    for r in ACTIVE_SUMMARY_ROWS:
+        sm.append(r)
+    path = tmp_path / "active_summary.xlsx"
+    wb.save(path)
+    return str(path)
+
+
 def _build_reference(wb):
     hc = wb.active
     hc.title = "HC"
