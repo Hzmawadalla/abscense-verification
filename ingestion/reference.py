@@ -98,28 +98,49 @@ def _structure_map(struct_rows):
     return mapping
 
 
-def parse_active_employees(path):
-    """Parse the 'All Active Employees' export (headers on row 2) into ReferenceData.
+def _find_active_sheet(wb):
+    """Locate a Line-Manager export sheet and its header row: the first sheet whose header row
+    (within the first few rows) carries both a 'crm account' and a 'line manager' column. Returns
+    (sheet_name, header_row) or None. Covers the standalone 'All Active Employees' export (headers
+    on row 2, system codes on row 1) and a combined workbook whose Line-Manager data sits on a tab
+    named e.g. 'Structure' with headers on row 1."""
+    for name in wb.sheetnames:
+        for idx, row in enumerate(wb[name].iter_rows(min_row=1, max_row=6, values_only=True), start=1):
+            hdrs = {norm_header(h) for h in row}
+            if "crm account" in hdrs and ("line manager email" in hdrs or "line manager" in hdrs):
+                return name, idx
+    return None
 
-    Each row is an employee carrying their Line Manager. Managers (verifiers) are those Line
-    Managers resolved to their own CRM by matching 'Line Manager Employee ID' -> that manager's own
-    row -> its 'CRM account'. 'Last Working Day' is stored as the employee's exit_date so the
-    summary parser can skip flagged days after it."""
+
+def parse_active_employees(path, sheet=None, header_row=None):
+    """Parse a Line-Manager export (the 'All Active Employees' style) into ReferenceData.
+
+    Each row is an employee carrying their Line Manager. The verifier is that Line Manager,
+    identified by EMAIL so a manager who is not themselves a row in the file is still a valid
+    verifier; when the Line Manager *is* an in-file employee (resolvable via 'Line Manager Employee
+    ID' -> that row's 'CRM account') their own CRM is used as the stable identity instead. 'Last
+    Working Day' is stored as exit_date so the summary parser can skip flagged days after it.
+
+    sheet/header_row are auto-detected when omitted (standalone export: row 2; combined workbook:
+    wherever the Line-Manager headers sit)."""
     import openpyxl
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    sheet = wb.sheetnames[0]
-    wb.close()
-    _, rows = read_dicts(path, sheet, header_row=2)   # row 1 = system codes, row 2 = human headers
+    if sheet is None or header_row is None:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        try:
+            sheet, header_row = _find_active_sheet(wb) or (wb.sheetnames[0], 2)
+        finally:
+            wb.close()
+    _, rows = read_dicts(path, sheet, header_row=header_row)
 
     ref = ReferenceData()
-    id_to_crm = {}   # Employee ID -> CRM account, to resolve a Line Manager to their own CRM
+    id_to_crm = {}   # Employee ID -> CRM account, to resolve an in-file Line Manager to their CRM
     for row in rows:
         crm = _clean(pick(row, "crm account"))
         emp_id = _clean(pick(row, "employee id"))
         if crm and not _is_junk_crm(crm) and emp_id:
             id_to_crm[emp_id] = crm
 
-    mgr_by_crm = {}
+    managers = {}   # identity key (lowercased crm or email) -> Manager
     seen = set()
     for row in rows:
         crm = _clean(pick(row, "crm account"))
@@ -132,25 +153,34 @@ def parse_active_employees(path):
         # id or email in as the manager's name.
         lm_name = _clean(row.get("line manager"))
         lm_email = _clean(pick(row, "line manager email"))
-        mgr_crm = id_to_crm.get(lm_id) if lm_id else None
-        if mgr_crm and _key(mgr_crm) != _key(crm):
-            if _key(mgr_crm) not in mgr_by_crm:
-                mgr_by_crm[_key(mgr_crm)] = Manager(crm=mgr_crm, name=lm_name, email=lm_email)
+        emp_email = _clean(pick(row, "email", "name email"))
+
+        # Verifier identity: an in-file CRM (resolved via the manager's employee id) first, else
+        # the manager's email — so a manager who isn't a row in the file is still a valid verifier.
+        in_file_crm = id_to_crm.get(lm_id) if lm_id else None
+        key = _key(in_file_crm) if in_file_crm else (_key(lm_email) if lm_email else None)
+        if key and key in (_key(crm), _key(emp_email)):   # reject self-management
+            key = None
+
+        if key:
+            if key not in managers:
+                managers[key] = Manager(crm=in_file_crm or lm_email, name=lm_name, email=lm_email)
+            manager_crm = managers[key].crm   # canonical, so all reports of one manager agree
         else:
-            mgr_crm = None
+            manager_crm = None
             ref.exceptions.append(RefException(
                 crm, "unmapped_employee",
-                f"line manager '{lm_name or lm_email or '?'}' not found in file"))
+                f"line manager '{lm_name or lm_email or lm_id or '?'}' could not be resolved"))
         ref.employees.append(Employee(
-            crm=crm, ps_id=emp_id if (emp_id := _clean(pick(row, "employee id"))) else None,
+            crm=crm, ps_id=_clean(pick(row, "employee id")),
             name=_clean(pick(row, "name")),
-            email=_clean(pick(row, "email", "name email")),
+            email=emp_email,
             department=_clean(pick(row, "department")),
             employee_status=_clean(pick(row, "employee status")),
             exit_date=to_date(pick(row, "last working day")),
-            manager_crm=mgr_crm))
+            manager_crm=manager_crm))
 
-    ref.managers = list(mgr_by_crm.values())
+    ref.managers = list(managers.values())
     mapped = sum(1 for e in ref.employees if e.manager_crm)
     ref.stats = {"managers": len(ref.managers), "employees": len(ref.employees),
                  "mapped_employees": mapped, "exceptions": len(ref.exceptions)}
@@ -158,20 +188,20 @@ def parse_active_employees(path):
 
 
 def parse_reference_any(path, aliases=None):
-    """Dispatch to the right reference parser: the new 'All Active Employees' single-sheet export
-    (CRM account + Line Manager on row 2) vs. the classic HC + Structure two-tab workbook."""
+    """Dispatch to the right reference parser. A Line-Manager export — a sheet carrying 'CRM account'
+    + 'Line Manager' columns, whether standalone or alongside an HC tab — goes to
+    parse_active_employees. Otherwise the classic HC + Structure (TL/Coach Lead) workbook goes to
+    parse_reference."""
     import openpyxl
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    names = wb.sheetnames
-    has_hc = any(n.strip().lower() == "hc" for n in names)
-    has_struct = any(n.strip().lower().startswith("structure") for n in names)
-    new_format = False
-    if not (has_hc and has_struct):
-        r2 = next(iter(wb[names[0]].iter_rows(min_row=2, max_row=2, values_only=True)), ())
-        hdrs = {norm_header(h) for h in r2}
-        new_format = "crm account" in hdrs and "line manager" in hdrs
-    wb.close()
-    return parse_active_employees(path) if new_format else parse_reference(path, aliases=aliases)
+    try:
+        found = _find_active_sheet(wb)
+    finally:
+        wb.close()
+    if found:
+        sheet, header_row = found
+        return parse_active_employees(path, sheet=sheet, header_row=header_row)
+    return parse_reference(path, aliases=aliases)
 
 
 def parse_reference(path, hc_sheet="HC", structure_sheet="Structure", aliases=None):

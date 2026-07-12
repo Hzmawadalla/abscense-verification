@@ -24,12 +24,11 @@ def test_employees_are_mapped_to_their_line_manager(active_employees_workbook):
     assert emps["A-2"].manager_crm == "MGR-1"
 
 
-def test_line_manager_becomes_a_verifier_with_email(active_employees_workbook):
-    # The verifier is resolved from Line Manager Employee ID -> that manager's own CRM row,
-    # and their email is captured for sending.
+def test_in_file_line_manager_is_keyed_by_crm(active_employees_workbook):
+    # When the line manager IS an in-file row (resolved via Line Manager Employee ID), the verifier
+    # keeps that manager's own CRM as their stable identity; their email is captured for sending.
     ref = parse_active_employees(active_employees_workbook)
     mgrs = _by_crm(ref.managers)
-    assert set(mgrs) == {"MGR-1"}
     assert mgrs["MGR-1"].name == "Manager One"
     assert mgrs["MGR-1"].email == "mgr1@x.com"
 
@@ -39,10 +38,19 @@ def test_last_working_day_is_stored_as_exit_date(active_employees_workbook):
     assert _by_crm(ref.employees)["A-2"].exit_date == datetime.date(2026, 5, 7)
 
 
-def test_employee_whose_line_manager_is_absent_is_unmapped(active_employees_workbook):
+def test_line_manager_not_in_file_is_mapped_by_email(active_employees_workbook):
+    # A-3's line manager (id 8888) is not an in-file row, but their email is present -> the employee
+    # is still mapped, and a verifier keyed by that email exists so a link can be sent.
     ref = parse_active_employees(active_employees_workbook)
-    assert _by_crm(ref.employees)["A-3"].manager_crm is None
-    assert ("A-3", "unmapped_employee") in _ref_reasons(ref)
+    assert _by_crm(ref.employees)["A-3"].manager_crm == "ghost@x.com"
+    assert _by_crm(ref.managers)["ghost@x.com"].email == "ghost@x.com"
+
+
+def test_employee_with_no_line_manager_is_unmapped(active_employees_workbook):
+    # A-4 has neither a resolvable id nor an email -> genuinely unmapped.
+    ref = parse_active_employees(active_employees_workbook)
+    assert _by_crm(ref.employees)["A-4"].manager_crm is None
+    assert ("A-4", "unmapped_employee") in _ref_reasons(ref)
 
 
 def test_top_manager_without_own_line_manager_is_unmapped(active_employees_workbook):
@@ -78,9 +86,22 @@ def test_dispatch_selects_active_format(active_employees_workbook):
 
 
 def test_dispatch_selects_classic_hc_structure(sample_workbook):
-    # HC + Structure tabs present -> classic parser (managers are the distinct TLs).
+    # HC + a classic Structure tab (no line-manager columns) -> classic parser (managers are TLs).
     ref = parse_reference_any(sample_workbook)
     assert set(_by_crm(ref.managers)) == {"TL-A", "TL-B", "TL-C"}
+
+
+def test_hybrid_hc_plus_linemanager_routes_to_email_mapping(hybrid_hc_linemanager_workbook):
+    # A workbook with an HC tab AND a 'Structure' tab that actually carries Line-Manager columns
+    # (headers on row 1) must route to line-manager mapping, not the classic TL/Coach-Lead parser.
+    ref = parse_reference_any(hybrid_hc_linemanager_workbook)
+    emps = _by_crm(ref.employees)
+    assert emps["H-1"].manager_crm == "M-IN"       # line manager in-file -> keyed by CRM
+    assert emps["H-2"].manager_crm == "yang@x.com"  # not in-file -> keyed by email (nbsp header ok)
+    assert emps["H-3"].manager_crm is None          # no line manager -> unmapped
+    mgrs = _by_crm(ref.managers)
+    assert mgrs["yang@x.com"].name == "Yang Boss"
+    assert mgrs["yang@x.com"].email == "yang@x.com"
 
 
 # --- summary: skip flagged days after an employee's last working day ---

@@ -62,9 +62,12 @@ ACTIVE_ROWS = [
      "Manager One", "9001", "mgr1@x.com"],
     ["A-2", "1002", "Beta",  "a2@x.com", "EA", "Active", datetime.datetime(2026, 5, 7),
      "Manager One", "9001", "mgr1@x.com"],
-    # Line manager (id 8888) is not present in the file -> employee cannot be mapped.
+    # Line manager (id 8888) is not an in-file row, but their email is on this row -> the employee
+    # is still mapped, keyed by the manager's email.
     ["A-3", "1003", "Gamma", "a3@x.com", "CC", "Active", None,
      "Ghost Mgr", "8888", "ghost@x.com"],
+    # No line manager at all (no id, no email) -> genuinely unmapped.
+    ["A-4", "1004", "Delta", "a4@x.com", "CC", "Active", None, None, None, None],
     # Junk CRM -> skipped entirely (not an employee, not a manager).
     ["N/A", "1099", "Junk",  "j@x.com",  "Admin", "Active", None,
      "Manager One", "9001", "mgr1@x.com"],
@@ -124,6 +127,44 @@ def active_employees_with_summary_workbook(tmp_path):
     for r in ACTIVE_SUMMARY_ROWS:
         sm.append(r)
     path = tmp_path / "active_summary.xlsx"
+    wb.save(path)
+    return str(path)
+
+
+# A real-world hybrid: an HC tab plus a tab literally named 'Structure' that actually carries a
+# Line-Manager export (headers on ROW 1, not row 2), where some line managers are NOT rows in the
+# file. The 'Line Manager Email' header carries a non-breaking space, as the real export does.
+HYBRID_HC_HEADERS = ["Type", "CRM", "Full Name", "Employee Status"]
+HYBRID_HC_ROWS = [["Full time", "M-IN", "In File Mgr", "Active"]]
+
+HYBRID_STRUCT_HEADERS = ["CRM account", "Employee ID", "Name", "Email", "Employee Status",
+                         "Last Working Day", "Line Manager", "Line Manager Employee ID",
+                         "Line Manager Email"]  # non-breaking space, as in the real export
+HYBRID_STRUCT_ROWS = [
+    # The in-file manager, present as their own row (resolvable by Employee ID 500).
+    ["M-IN", "500", "In File Mgr", "min@x.com", "Active", None, None, None, None],
+    # Line manager IS in the file (id 500) -> keyed by that manager's CRM.
+    ["H-1", "1001", "Emp H1", "h1@x.com", "Active", None, "In File Mgr", "500", "min@x.com"],
+    # Line manager NOT in the file (id 999) -> keyed by the manager's email.
+    ["H-2", "1002", "Emp H2", "h2@x.com", "Active", None, "Yang Boss", "999", "yang@x.com"],
+    # No line manager -> unmapped.
+    ["H-3", "1003", "Emp H3", "h3@x.com", "Active", None, None, None, None],
+]
+
+
+@pytest.fixture
+def hybrid_hc_linemanager_workbook(tmp_path):
+    wb = openpyxl.Workbook()
+    hc = wb.active
+    hc.title = "HC"
+    hc.append(HYBRID_HC_HEADERS)
+    for r in HYBRID_HC_ROWS:
+        hc.append(r)
+    st = wb.create_sheet("Structure")  # named 'Structure' but holds Line-Manager columns
+    st.append(HYBRID_STRUCT_HEADERS)
+    for r in HYBRID_STRUCT_ROWS:
+        st.append(r)
+    path = tmp_path / "hybrid.xlsx"
     wb.save(path)
     return str(path)
 
