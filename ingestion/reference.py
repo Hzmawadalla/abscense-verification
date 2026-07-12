@@ -7,7 +7,7 @@ CRM is the join key across tabs but its casing is inconsistent between HC and St
 matching is case-insensitive on a lowercased key; the canonical display casing comes from HC."""
 from dataclasses import dataclass, field
 
-from .workbook import pick, read_dicts, to_date
+from .workbook import norm_header, pick, read_dicts, to_date
 
 PLACEHOLDERS = {"boot camp"}
 _JUNK_CRM = {"n/a", "#n/a", "#ref!", "0", "na", "none"}
@@ -96,6 +96,79 @@ def _structure_map(struct_rows):
             "sm_raw": sm, "team": _clean(pick(row, "team")), "emp_raw": ecrm,
         }
     return mapping
+
+
+def parse_active_employees(path):
+    """Parse the 'All Active Employees' export (headers on row 2) into ReferenceData.
+
+    Each row is an employee carrying their Line Manager. Managers (verifiers) are those Line
+    Managers resolved to their own CRM by matching 'Line Manager Employee ID' -> that manager's own
+    row -> its 'CRM account'. 'Last Working Day' is stored as the employee's exit_date so the
+    summary parser can skip flagged days after it."""
+    import openpyxl
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    sheet = wb.sheetnames[0]
+    wb.close()
+    _, rows = read_dicts(path, sheet, header_row=2)   # row 1 = system codes, row 2 = human headers
+
+    ref = ReferenceData()
+    id_to_crm = {}   # Employee ID -> CRM account, to resolve a Line Manager to their own CRM
+    for row in rows:
+        crm = _clean(pick(row, "crm account"))
+        emp_id = _clean(pick(row, "employee id"))
+        if crm and not _is_junk_crm(crm) and emp_id:
+            id_to_crm[emp_id] = crm
+
+    mgr_by_crm = {}
+    seen = set()
+    for row in rows:
+        crm = _clean(pick(row, "crm account"))
+        if not crm or _is_junk_crm(crm) or _key(crm) in seen:
+            continue
+        seen.add(_key(crm))
+        lm_id = _clean(pick(row, "line manager employee id"))
+        lm_name = _clean(pick(row, "line manager"))
+        lm_email = _clean(pick(row, "line manager email"))
+        mgr_crm = id_to_crm.get(lm_id) if lm_id else None
+        if mgr_crm and _key(mgr_crm) != _key(crm):
+            if _key(mgr_crm) not in mgr_by_crm:
+                mgr_by_crm[_key(mgr_crm)] = Manager(crm=mgr_crm, name=lm_name, email=lm_email)
+        else:
+            mgr_crm = None
+            ref.exceptions.append(RefException(
+                crm, "unmapped_employee",
+                f"line manager '{lm_name or lm_email or '?'}' not found in file"))
+        ref.employees.append(Employee(
+            crm=crm, ps_id=emp_id if (emp_id := _clean(pick(row, "employee id"))) else None,
+            name=_clean(pick(row, "name")),
+            email=_clean(pick(row, "email", "name email")),
+            department=_clean(pick(row, "department")),
+            employee_status=_clean(pick(row, "employee status")),
+            exit_date=to_date(pick(row, "last working day")),
+            manager_crm=mgr_crm))
+
+    ref.managers = list(mgr_by_crm.values())
+    mapped = sum(1 for e in ref.employees if e.manager_crm)
+    ref.stats = {"managers": len(ref.managers), "employees": len(ref.employees),
+                 "mapped_employees": mapped, "exceptions": len(ref.exceptions)}
+    return ref
+
+
+def parse_reference_any(path, aliases=None):
+    """Dispatch to the right reference parser: the new 'All Active Employees' single-sheet export
+    (CRM account + Line Manager on row 2) vs. the classic HC + Structure two-tab workbook."""
+    import openpyxl
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    names = wb.sheetnames
+    has_hc = any(n.strip().lower() == "hc" for n in names)
+    has_struct = any(n.strip().lower().startswith("structure") for n in names)
+    new_format = False
+    if not (has_hc and has_struct):
+        r2 = next(iter(wb[names[0]].iter_rows(min_row=2, max_row=2, values_only=True)), ())
+        hdrs = {norm_header(h) for h in r2}
+        new_format = "crm account" in hdrs and "line manager" in hdrs
+    wb.close()
+    return parse_active_employees(path) if new_format else parse_reference(path, aliases=aliases)
 
 
 def parse_reference(path, hc_sheet="HC", structure_sheet="Structure", aliases=None):

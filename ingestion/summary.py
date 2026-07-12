@@ -123,6 +123,8 @@ def ingest_summary(path, reference, year, sheet="Summary Report", header_row=3):
             emp = emp_by_key.get(_key(crm))
             if emp is None:
                 result.exceptions.append(IngestionException(crm, day, raw, "unknown_employee"))
+            elif getattr(emp, "exit_date", None) and day > emp.exit_date:
+                result.exceptions.append(IngestionException(crm, day, raw, "after_last_working_day"))
             elif emp.manager_crm is None:
                 result.exceptions.append(IngestionException(crm, day, raw, "blocked_unmapped"))
             else:

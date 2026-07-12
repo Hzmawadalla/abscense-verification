@@ -19,7 +19,7 @@ from app.storage import StorageClient, object_path, validate_upload
 from ingestion import loader
 from ingestion.config import load_aliases, load_dingtalk_ids
 from ingestion.db_psycopg import PsycopgDB
-from ingestion.reference import parse_reference
+from ingestion.reference import parse_reference_any
 from ingestion.summary import ingest_summary
 
 st.set_page_config(page_title="Attendance Verification", page_icon="🗓️", layout="wide")
@@ -305,7 +305,7 @@ def render_hrbp():
             att_path = ref_path if att_src is ref_src else _save(att_src)
 
             try:
-                ref = parse_reference(ref_path, aliases=load_aliases())
+                ref = parse_reference_any(ref_path, aliases=load_aliases())
             except KeyError as e:
                 st.error(f"The reference workbook is missing a required tab ({e}). It must contain "
                          "**HC** and **Structure** sheets (from the HR export).")
