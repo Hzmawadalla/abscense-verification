@@ -410,8 +410,10 @@ def render_hrbp():
                 cols[3].code(st.session_state[f"link{mgr['id']}"], language=None)
 
     with tab_close:
-        st.warning("Closes every remaining open case as **Absent** (period cutoff). Cannot be undone.")
-        if st.button("Close the period now", type="primary"):
+        st.warning("Closes **every** remaining open case as **Absent** (period cutoff). "
+                   "**Irreversible** — only use this at the very end, once all cases are verified.")
+        confirm = st.checkbox("Yes, I understand this permanently closes all open cases as Absent.")
+        if st.button("Close the period now", type="primary", disabled=not confirm):
             n = data.close_open_month(c, actor)
             st.success(f"Closed {n} open case(s) as Absent.")
 
