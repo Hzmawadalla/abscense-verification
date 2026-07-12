@@ -1,0 +1,28 @@
+name: keep-warm
+
+# Keeps the Streamlit Community Cloud app awake during Egypt working hours (Sun–Thu, ~9am–7pm)
+# so the first visitor of the day doesn't wait for the free-tier cold-start wake-up.
+# Cron is UTC; 06:00–17:00 UTC covers 9am–7pm Egypt in both standard time (UTC+2) and DST (UTC+3),
+# and the first ping (~06:00 UTC ≈ 8–9am Egypt) wakes the app before the workday starts.
+
+on:
+  schedule:
+    - cron: '*/10 6-17 * * 0-4'   # every 10 min, 06:00–17:00 UTC, Sunday–Thursday
+  workflow_dispatch:              # allow manual runs from the Actions tab
+
+# Only one keep-warm run at a time; a new run cancels a still-running previous one.
+concurrency:
+  group: keep-warm
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping the app to keep it warm
+        run: |
+          base="https://abscense-verification-51talk.streamlit.app"
+          for path in "/_stcore/health" "/"; do
+            code=$(curl -sS -o /dev/null -w "%{http_code}" -m 30 "$base$path" || echo "000")
+            echo "$base$path -> $code"
+          done
