@@ -156,8 +156,8 @@ def render_tl(token: str):
             choices = {}
             for cs in pending:
                 hd = " · ½ day" if cs["is_half_day"] else ""
-                st.markdown(f"**{cs['employee_name']}** — {cs['work_date']} · flagged as "
-                            f"*{cs['source_status']}*{hd}")
+                st.markdown(f"**{cs['employee_name']}** · `{cs['employee_crm']}` — {cs['work_date']} · "
+                            f"flagged as *{cs['source_status']}*{hd}")
                 col1, col2 = st.columns([1, 2])
                 verdict = col1.selectbox("Verdict", list(VERDICTS.keys()), key=f"v{cs['id']}")
                 comment = col2.text_input("Comment (evidence, e.g. approved leave email)",
@@ -198,8 +198,8 @@ def render_tl(token: str):
         for cs in done:
             hd = " · ½ day" if cs["is_half_day"] else ""
             verdict = VERDICT_LABEL.get(cs["manager_status"], cs["manager_status"] or "—")
-            line = (f"**{cs['employee_name']}** — {cs['work_date']} · flagged *{cs['source_status']}*{hd} "
-                    f"→ **{verdict}**")
+            line = (f"**{cs['employee_name']}** · `{cs['employee_crm']}` — {cs['work_date']} · "
+                    f"flagged *{cs['source_status']}*{hd} → **{verdict}**")
             if cs["manager_comment"]:
                 line += f" · _{cs['manager_comment']}_"
             st.markdown(line)
@@ -246,14 +246,16 @@ def render_hrbp():
         rows = data.list_cases(c, status=None if status_filter == "(all)" else status_filter)
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
-        st.subheader("Resolve a responded case")
-        responded = [r for r in data.list_cases(c, status="manager_responded")]
-        if responded:
-            label = {f"{r['employee_name']} · {r['work_date']} · TL said {r['manager_status']}": r
-                     for r in responded}
-            pick = st.selectbox("Case", list(label))
+        st.subheader("Override a finalized case (optional)")
+        st.caption("TL verdicts finalize automatically — use this only to correct a specific case.")
+        finalized = data.list_cases(c, status="closed")
+        if finalized:
+            label = {f"{r['employee_name']} · {r['work_date']} · final: {r['final_status']}": r
+                     for r in finalized}
+            pick = st.selectbox("Finalized case", list(label))
             r = label[pick]
-            st.write(f"TL verdict: **{r['manager_status']}** · comment: {r['manager_comment'] or '—'}")
+            st.write(f"Current final: **{r['final_status']}** · TL said *{r['manager_status'] or '—'}* · "
+                     f"comment: {r['manager_comment'] or '—'}")
             sc = storage_client()
             for a in data.list_attachments(c, r["id"]):
                 if sc:
@@ -263,21 +265,17 @@ def render_hrbp():
                         st.caption(f"📎 {a['filename']} (link error: {e})")
                 else:
                     st.caption(f"📎 {a['filename']} (storage not configured)")
-            cc = st.columns(2)
-            if cc[0].button("✅ Close as-is (accept TL verdict)"):
-                data.close_case(c, r["id"], actor)
-                st.rerun()
-            with cc[1]:
-                ov = st.selectbox("Override to", list(VERDICTS.keys()), key="ov")
-                ovc = st.text_input("Reason (required for override)", key="ovc")
-                if st.button("Override & close"):
-                    if not ovc.strip():
-                        st.error("Override requires a reason.")
-                    else:
-                        data.close_case(c, r["id"], actor, final_status=VERDICTS[ov], comment=ovc)
-                        st.rerun()
+            ov = st.selectbox("Override to", list(VERDICTS.keys()), key="ov")
+            ovc = st.text_input("Reason (required for override)", key="ovc")
+            if st.button("Override"):
+                if not ovc.strip():
+                    st.error("Override requires a reason.")
+                else:
+                    data.close_case(c, r["id"], actor, final_status=VERDICTS[ov], comment=ovc)
+                    st.success("Case overridden.")
+                    st.rerun()
         else:
-            st.caption("No responded cases awaiting resolution.")
+            st.caption("No finalized cases yet.")
 
     with tab_ingest:
         st.write("Upload this period's workbooks to create verification cases. The **HC** and "

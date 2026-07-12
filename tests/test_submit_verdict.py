@@ -25,8 +25,8 @@ class FakeCursor:
         elif s.startswith("update attendance.cases"):
             row = self.store.get(params[-1])                  # last param is the case id
             if row and row["status"] == "open":               # the one-time guard
-                row.update(status="manager_responded", manager_status=params[0],
-                           leave_type=params[1], manager_comment=params[2])
+                row.update(status="closed", manager_status=params[0], final_status=params[1],
+                           leave_type=params[2], manager_comment=params[3])
                 self.rowcount = 1
             else:
                 self.rowcount = 0
@@ -52,14 +52,16 @@ class FakeConn:
 
 
 def _case(status="open"):
-    return {"status": status, "manager_status": None, "leave_type": None, "manager_comment": None}
+    return {"status": status, "manager_status": None, "final_status": None,
+            "leave_type": None, "manager_comment": None}
 
 
-def test_first_submit_on_open_case_succeeds():
+def test_first_submit_on_open_case_finalizes():
     conn = FakeConn({1: _case("open")})
     assert data.submit_verdict(conn, 1, "annual_leave", None, "approved", "tl:TL-A") is True
-    assert conn.store[1]["status"] == "manager_responded"
+    assert conn.store[1]["status"] == "closed"                 # auto-finalized
     assert conn.store[1]["manager_status"] == "annual_leave"
+    assert conn.store[1]["final_status"] == "annual_leave"
 
 
 def test_second_submit_on_same_case_is_rejected_and_leaves_first_answer():

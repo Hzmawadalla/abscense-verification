@@ -90,15 +90,17 @@ def submit_verdict(conn, case_id, manager_status, leave_type, comment, actor) ->
         if old is None or old["status"] != "open":
             return False
         cur.execute(
-            "update attendance.cases set status = 'manager_responded', manager_status = %s, "
-            "leave_type = %s, manager_comment = %s, manager_responded_at = now() "
+            "update attendance.cases set status = 'closed', manager_status = %s, final_status = %s, "
+            "leave_type = %s, manager_comment = %s, manager_responded_at = now(), "
+            "closed_by = 'tl', closed_at = now() "
             "where id = %s and status = 'open'",
-            (manager_status, leave_type, comment, case_id))
+            (manager_status, manager_status, leave_type, comment, case_id))
         if cur.rowcount == 0:
             conn.rollback()
             return False
         _audit(cur, case_id, actor, "tl_verdict", old,
-               {"manager_status": manager_status, "leave_type": leave_type, "manager_comment": comment})
+               {"manager_status": manager_status, "final_status": manager_status,
+                "leave_type": leave_type, "manager_comment": comment})
     conn.commit()
     return True
 
@@ -144,14 +146,14 @@ def close_case(conn, case_id, actor, final_status=None, final_leave_type=None, c
         cur.execute("select status, manager_status, leave_type, final_status "
                     "from attendance.cases where id = %s", (case_id,))
         old = cur.fetchone()
-        if old is None or old["status"] == "closed":
+        if old is None:  # allow overriding an already-closed (TL-finalized) case
             return False
         final = final_status or old["manager_status"]
         leave = final_leave_type if final_status else old["leave_type"]
         cur.execute(
             "update attendance.cases set status = 'closed', final_status = %s, final_leave_type = %s, "
             "closed_by = 'hrbp', closed_at = now(), "
-            "manager_comment = coalesce(%s, manager_comment) where id = %s and status <> 'closed'",
+            "manager_comment = coalesce(%s, manager_comment) where id = %s",
             (final, leave, comment, case_id))
         if cur.rowcount == 0:
             conn.rollback()
