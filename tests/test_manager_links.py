@@ -1,5 +1,13 @@
-"""Behavior contract for TL link tokens: generation is idempotent; rotation is explicit."""
-from app import data, security
+"""Behavior contract for TL link tokens: generation is idempotent, the stored token is encrypted
+at rest, and rotation is explicit."""
+import os
+
+from cryptography.fernet import Fernet
+
+# A key must exist before security._fernet() runs; a per-run key round-trips fine within the suite.
+os.environ.setdefault("TOKEN_ENC_KEY", Fernet.generate_key().decode())
+
+from app import data, security  # noqa: E402 — import after the key is set
 
 
 class FakeCursor:
@@ -18,12 +26,12 @@ class FakeCursor:
     def execute(self, sql, params=None):
         s = " ".join(sql.lower().split())
         self.calls.append(s.split()[0])  # 'select' / 'update'
-        if s.startswith("select access_token from attendance.managers"):
+        if s.startswith("select access_token_enc from attendance.managers"):
             row = self.store.get(params[0])
-            self._fetch = (row.get("access_token"),) if row else None
-        elif s.startswith("update attendance.managers set access_token"):
-            token, token_hash, mid = params
-            self.store.setdefault(mid, {}).update(access_token=token, access_token_hash=token_hash)
+            self._fetch = (row.get("access_token_enc"),) if row else None
+        elif s.startswith("update attendance.managers set access_token_enc"):
+            enc, token_hash, mid = params
+            self.store.setdefault(mid, {}).update(access_token_enc=enc, access_token_hash=token_hash)
         elif s.startswith("select id, crm, name, email, access_token_hash, active"):
             want = params[0]
             self._fetch = next(
@@ -49,14 +57,16 @@ class FakeConn:
 
 
 def _mgr():
-    return {"access_token": None, "access_token_hash": None, "active": True}
+    return {"access_token_enc": None, "access_token_hash": None, "active": True}
 
 
-def test_generate_mints_and_stores_a_token_when_none_exists():
+def test_generate_mints_stores_encrypted_and_hashes():
     conn = FakeConn({"m1": _mgr()})
     tok = data.generate_manager_link(conn, "m1")
+    stored = conn.store["m1"]["access_token_enc"]
     assert tok
-    assert conn.store["m1"]["access_token"] == tok
+    assert stored != tok                                   # stored value is ciphertext, not plaintext
+    assert security.decrypt_token(stored) == tok           # ...that round-trips back to the token
     assert conn.store["m1"]["access_token_hash"] == security.hash_token(tok)
 
 
@@ -76,3 +86,10 @@ def test_rotate_replaces_token_and_invalidates_the_old_link():
     assert new != old
     assert data.manager_by_token(conn, old) is None
     assert data.manager_by_token(conn, new)["id"] == "m1"
+
+
+def test_decrypt_token_returns_none_on_unreadable_ciphertext():
+    # Resilience: garbage or a value encrypted under a different key is treated as "no token",
+    # so generate_manager_link mints a fresh one rather than crashing.
+    assert security.decrypt_token("not-a-valid-fernet-token") is None
+    assert security.decrypt_token("") is None

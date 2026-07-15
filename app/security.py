@@ -6,11 +6,41 @@ constant time. A leaked token can at worst *excuse* an absence, and the default 
 HRBP layer: per-user bcrypt password hashes (compatible with streamlit-authenticator)."""
 import hashlib
 import hmac
+import os
 import secrets
 
 import bcrypt
+from cryptography.fernet import Fernet, InvalidToken
 
 TOKEN_BYTES = 32
+TOKEN_ENC_KEY_ENV = "TOKEN_ENC_KEY"
+
+
+def _fernet() -> Fernet:
+    """Fernet built from TOKEN_ENC_KEY (a urlsafe-base64 32-byte key held in app secrets / env,
+    never in the database). Raising here surfaces a misconfiguration rather than storing plaintext."""
+    key = os.environ.get(TOKEN_ENC_KEY_ENV)
+    if not key:
+        raise RuntimeError(
+            f"{TOKEN_ENC_KEY_ENV} is not configured — TL link encryption is unavailable. "
+            "Generate one with Fernet.generate_key() and set it in Streamlit Secrets / env.")
+    return Fernet(key.encode("utf-8") if isinstance(key, str) else key)
+
+
+def encrypt_token(token: str) -> str:
+    """Encrypt a raw TL token for at-rest storage."""
+    return _fernet().encrypt(token.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_token(ciphertext: str) -> str | None:
+    """Recover a raw TL token from stored ciphertext, or None if unreadable (e.g. the key was
+    rotated) — the caller then mints a fresh token instead."""
+    if not ciphertext:
+        return None
+    try:
+        return _fernet().decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+    except (InvalidToken, ValueError):
+        return None
 
 
 def generate_token() -> str:

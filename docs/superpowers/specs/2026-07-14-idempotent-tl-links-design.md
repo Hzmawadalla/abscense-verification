@@ -18,11 +18,14 @@ explicitly-labelled **Rotate** action.
 
 ## Approach
 
-Store the raw token alongside its hash so the app can reproduce a link on demand (Approach A,
-chosen over an HMAC-derived-token scheme for simplicity). These tokens are low-sensitivity bearer
-capabilities — they already travel by email and rest in inboxes as plaintext, and unlock only a
-TL's own attendance-verification list (names + flagged days, no financial data) — so storing the
-raw token in the service-role-only DB is a small incremental risk.
+Store the token **encrypted at rest** (Fernet) alongside its hash so the app can reproduce a link on
+demand. The encryption key (`TOKEN_ENC_KEY`) lives in app secrets / env — **never in the database** —
+so a database compromise alone does not yield usable tokens. (`cryptography` is already a pinned
+dependency, so this adds no new package.)
+
+> Revised from the original plan, which stored the raw token in plaintext: an automated security
+> review flagged plaintext capability storage as HIGH, and the user chose the encrypted-at-rest
+> variant before shipping.
 
 ## Components
 
@@ -31,24 +34,37 @@ raw token in the service-role-only DB is a small incremental risk.
 Add a nullable column to `attendance.managers`:
 
 ```sql
-alter table attendance.managers add column access_token text;
+alter table attendance.managers add column access_token_enc text;
 ```
 
 Additive and non-breaking; existing rows get `NULL`. The existing `access_token_hash` (unique)
 remains the lookup key — no change to how a TL link is validated.
 
-### 2. Data layer — `app/data.py`
+### 2. Crypto helpers — `app/security.py`
+
+- **`encrypt_token(token) -> str`** / **`decrypt_token(ciphertext) -> str | None`** using Fernet with
+  `TOKEN_ENC_KEY` from the environment. `decrypt_token` returns `None` on unreadable ciphertext
+  (e.g. the key was rotated) so callers mint a fresh token instead of crashing.
+
+### 3. Data layer — `app/data.py`
 
 - **`generate_manager_link(conn, manager_id) -> str`** becomes idempotent:
-  - `SELECT access_token FROM attendance.managers WHERE id = %s`.
-  - If a token exists, return it — **no write**.
-  - Otherwise mint a token, `UPDATE ... SET access_token = raw, access_token_hash = hash(raw)`,
-    commit, return the raw token.
+  - `SELECT access_token_enc FROM attendance.managers WHERE id = %s`.
+  - If ciphertext exists and decrypts, return the recovered token — **no write**.
+  - Otherwise mint a token, `UPDATE ... SET access_token_enc = encrypt(raw),
+    access_token_hash = hash(raw)`, commit, return the raw token.
 - **`rotate_manager_link(conn, manager_id) -> str`** (new): always mint a fresh token, overwrite
-  both `access_token` and `access_token_hash`, commit, return it. This is the *previous*
+  both `access_token_enc` and `access_token_hash`, commit, return it. This is the *previous*
   `generate_manager_link` behavior, now reachable only through an explicit action.
 - **`manager_by_token(conn, token)`** unchanged — still matches on `access_token_hash` and
-  `active`. Storing the raw token does not change validation.
+  `active`.
+
+### Key management
+
+`TOKEN_ENC_KEY` (a Fernet key) is read from `os.environ` by `security._fernet()`.
+`streamlit_app.py` mirrors it from Streamlit Secrets into the environment at startup so the pure
+`security` module needs no Streamlit dependency. It must be present in Streamlit Secrets before the
+new code runs, or link generation raises a clear configuration error.
 
 ### 3. UI — `streamlit_app.py`
 

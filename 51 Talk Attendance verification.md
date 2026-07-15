@@ -125,6 +125,7 @@ link, and lets **HRBP** close or override before results merge back into payroll
 |---|---|
 | `SUPABASE_DB_URL` | database connection (required) |
 | `AUTH_COOKIE_KEY` | HRBP login sessions |
+| `TOKEN_ENC_KEY` | Fernet key encrypting stored TL tokens (required to generate links) |
 | `APP_BASE_URL` | base of the TL links — must be the real app URL |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | case attachments |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `MAIL_FROM` / `MAIL_REPLY_TO` | email sending (optional) |

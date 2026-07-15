@@ -25,6 +25,12 @@ from ingestion.summary import ingest_summary
 
 st.set_page_config(page_title="Attendance Verification", page_icon="🗓️", layout="wide")
 
+# Mirror the TL-link encryption key from Streamlit Secrets into the environment so the pure
+# security module (no Streamlit dependency) can read it via os.environ.
+_enc_key = st.secrets.get("TOKEN_ENC_KEY", os.environ.get("TOKEN_ENC_KEY"))
+if _enc_key:
+    os.environ["TOKEN_ENC_KEY"] = _enc_key
+
 # Verdict dropdown (label -> stored enum code), shared by the TL page and HRBP override.
 VERDICTS = {
     "Present": "present",

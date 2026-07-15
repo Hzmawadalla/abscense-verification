@@ -57,15 +57,19 @@ def manager_by_token(conn, token):
 def generate_manager_link(conn, manager_id) -> str:
     """Return the manager's existing TL link token, minting and storing one only if none exists.
     Idempotent: repeat calls (copy, download-all, re-email) return the same token, so links already
-    distributed keep working. Use rotate_manager_link to deliberately invalidate and replace."""
+    distributed keep working. The token is stored encrypted (key in app secrets, not the DB) and
+    decrypted here to reproduce the link. Use rotate_manager_link to deliberately replace it."""
     with conn.cursor() as cur:
-        cur.execute("select access_token from attendance.managers where id = %s", (manager_id,))
+        cur.execute("select access_token_enc from attendance.managers where id = %s", (manager_id,))
         row = cur.fetchone()
         if row and row[0]:
-            return row[0]
+            existing = security.decrypt_token(row[0])
+            if existing:
+                return existing   # unreadable ciphertext (e.g. rotated key) falls through to mint
         token = security.generate_token()
-        cur.execute("update attendance.managers set access_token = %s, access_token_hash = %s "
-                    "where id = %s", (token, security.hash_token(token), manager_id))
+        cur.execute("update attendance.managers set access_token_enc = %s, access_token_hash = %s "
+                    "where id = %s", (security.encrypt_token(token), security.hash_token(token),
+                                      manager_id))
     conn.commit()
     return token
 
@@ -75,8 +79,9 @@ def rotate_manager_link(conn, manager_id) -> str:
     sent. Deliberate rotation only (the pre-idempotency generate_manager_link behavior)."""
     token = security.generate_token()
     with conn.cursor() as cur:
-        cur.execute("update attendance.managers set access_token = %s, access_token_hash = %s "
-                    "where id = %s", (token, security.hash_token(token), manager_id))
+        cur.execute("update attendance.managers set access_token_enc = %s, access_token_hash = %s "
+                    "where id = %s", (security.encrypt_token(token), security.hash_token(token),
+                                      manager_id))
     conn.commit()
     return token
 
