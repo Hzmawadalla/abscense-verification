@@ -339,8 +339,8 @@ def render_hrbp():
 
     with tab_links:
         st.write("Generate each TL's unique link and send it — by **email**, DingTalk, or copy manually.")
-        st.caption("⚠️ Send each link **once**. Generating a new link — or re-preparing the download — "
-                   "rotates that TL's token and invalidates any link you already sent.")
+        st.caption("🔗 Links are stable — copying, e-mailing, or re-downloading returns the **same** "
+                   "link. Only a TL's **Rotate** button issues a new link (and kills the old one).")
         base = st.text_input("App base URL", st.secrets.get("APP_BASE_URL", "https://your-app.streamlit.app"))
         client = dingtalk_client()
         mailer = mailer_client()
@@ -396,11 +396,11 @@ def render_hrbp():
             st.download_button(f"⬇️ Download TL_links.xlsx ({st.session_state.get('links_n', 0)} TLs)",
                                data=st.session_state["links_xlsx"], file_name="TL_links.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            st.caption("These are now the current valid links — distribute this file; preparing again "
-                       "rotates the tokens and invalidates them.")
+            st.caption("These are the current valid links — preparing again returns the **same** links, "
+                       "so re-downloading is safe.")
 
         for mgr in overview:
-            cols = st.columns([4, 1, 1, 3])
+            cols = st.columns([4, 1, 1, 1, 3])
             email = mgr.get("email") or "— no email —"
             cols[0].write(f"**{mgr['name'] or mgr['crm']}** · {mgr['open_cases']} open · {email}")
             if cols[1].button("Link", key=f"gl{mgr['id']}"):
@@ -410,8 +410,15 @@ def render_hrbp():
             if cols[2].button("Email", key=f"eml{mgr['id']}", disabled=not can_email):
                 ok, err = send_tl_email(c, mailer, mgr, base)
                 st.success(f"Emailed {mgr['name']}.") if ok else st.error(f"Failed: {err}")
+            # Rotate is the ONLY action that invalidates an existing link — gated by a confirm box.
+            confirm = cols[3].checkbox("↻?", key=f"rotok{mgr['id']}",
+                                       help="Rotate = issue a new link and invalidate the current one")
+            if cols[3].button("Rotate", key=f"rot{mgr['id']}", disabled=not confirm):
+                tok = data.rotate_manager_link(c, mgr["id"])
+                st.session_state[f"link{mgr['id']}"] = f"{base}/?t={tok}"
+                st.warning(f"Rotated {mgr['name'] or mgr['crm']}'s link — the previous link no longer works.")
             if st.session_state.get(f"link{mgr['id']}"):
-                cols[3].code(st.session_state[f"link{mgr['id']}"], language=None)
+                cols[4].code(st.session_state[f"link{mgr['id']}"], language=None)
 
     with tab_close:
         st.error("⚠️ **DANGER — this is NOT a 'save' or 'process' button.** It permanently closes "
