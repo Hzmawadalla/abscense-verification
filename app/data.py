@@ -55,11 +55,28 @@ def manager_by_token(conn, token):
 
 
 def generate_manager_link(conn, manager_id) -> str:
-    """Issue (or rotate) a TL token; store only its hash, return the raw token for the link."""
+    """Return the manager's existing TL link token, minting and storing one only if none exists.
+    Idempotent: repeat calls (copy, download-all, re-email) return the same token, so links already
+    distributed keep working. Use rotate_manager_link to deliberately invalidate and replace."""
+    with conn.cursor() as cur:
+        cur.execute("select access_token from attendance.managers where id = %s", (manager_id,))
+        row = cur.fetchone()
+        if row and row[0]:
+            return row[0]
+        token = security.generate_token()
+        cur.execute("update attendance.managers set access_token = %s, access_token_hash = %s "
+                    "where id = %s", (token, security.hash_token(token), manager_id))
+    conn.commit()
+    return token
+
+
+def rotate_manager_link(conn, manager_id) -> str:
+    """Mint a brand-new TL token, overwriting any existing one — this INVALIDATES the link already
+    sent. Deliberate rotation only (the pre-idempotency generate_manager_link behavior)."""
     token = security.generate_token()
     with conn.cursor() as cur:
-        cur.execute("update attendance.managers set access_token_hash = %s where id = %s",
-                    (security.hash_token(token), manager_id))
+        cur.execute("update attendance.managers set access_token = %s, access_token_hash = %s "
+                    "where id = %s", (token, security.hash_token(token), manager_id))
     conn.commit()
     return token
 
