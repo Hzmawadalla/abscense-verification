@@ -28,14 +28,14 @@ def test_load_reference_upserts_managers_before_employees(sample_workbook_with_s
     assert db.calls[1][1] == loader.UPSERT_EMPLOYEE
     assert len(db.calls[1][2]) == len(ref.employees)
     # employee params carry manager_crm (for the FK subselect), not a raw id
+    e1 = next(p for p in db.calls[1][2] if p[0] == "E-1")
+    assert e1[7] == "TL-A"
 
 
 def test_upsert_manager_does_not_touch_link_token():
     # A plain re-ingest must preserve a manager's issued link: the manager upsert may not write
     # access_token or access_token_hash on conflict, or every re-ingest would invalidate links.
     assert "access_token" not in loader.UPSERT_MANAGER.lower()
-    e1 = next(p for p in db.calls[1][2] if p[0] == "E-1")
-    assert e1[7] == "TL-A"
 
 
 def test_load_ingestion_records_run_then_cases_then_exceptions(sample_workbook_with_summary):
