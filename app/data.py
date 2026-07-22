@@ -284,3 +284,45 @@ def list_attachments(conn, case_id):
         cur.execute("select storage_path, filename, content_type from attendance.case_attachments "
                     "where case_id = %s order by uploaded_at", (case_id,))
         return cur.fetchall()
+
+
+# --------------------------------------------------------------------------- upload management
+def list_uploads(conn):
+    """Every ingestion run with its case counts (newest first), for the HRBP Uploads panel."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "select r.id, r.source_filename, r.created_at, "
+            "       count(c.id) as total, "
+            "       count(c.id) filter (where c.manager_status is not null) as verified, "
+            "       count(c.id) filter (where c.status = 'open') as open "
+            "from attendance.ingestion_runs r "
+            "left join attendance.cases c on c.ingestion_run_id = r.id "
+            "group by r.id, r.source_filename, r.created_at "
+            "order by r.created_at desc")
+        return cur.fetchall()
+
+
+def remove_upload(conn, run_id) -> dict:
+    """Delete one upload: its cases (by ingestion_run_id) then the run (exceptions cascade).
+    Returns how many cases — and how many of them verified — were removed."""
+    with conn.cursor() as cur:
+        cur.execute("select count(*), count(*) filter (where manager_status is not null) "
+                    "from attendance.cases where ingestion_run_id = %s", (run_id,))
+        total, verified = cur.fetchone()
+        cur.execute("delete from attendance.cases where ingestion_run_id = %s", (run_id,))
+        cur.execute("delete from attendance.ingestion_runs where id = %s", (run_id,))
+    conn.commit()
+    return {"cases_deleted": total, "verified_deleted": verified}
+
+
+def reset_all_cases(conn) -> dict:
+    """Clear all case data (cases, ingestion exceptions, ingestion runs) for a fresh start.
+    Managers, employees, TL tokens, status vocabulary, and HRBP logins are preserved."""
+    with conn.cursor() as cur:
+        cur.execute("select count(*) from attendance.cases")
+        n = cur.fetchone()[0]
+        cur.execute("delete from attendance.cases")
+        cur.execute("delete from attendance.ingestion_exceptions")
+        cur.execute("delete from attendance.ingestion_runs")
+    conn.commit()
+    return {"cases_deleted": n}
