@@ -239,8 +239,9 @@ def render_hrbp():
         st.write(f"Signed in as **{st.session_state.get('name')}**")
         authenticator.logout("Log out", "sidebar")
 
-    tab_dash, tab_ingest, tab_exc, tab_links, tab_close, tab_export = st.tabs(
-        ["📋 Dashboard", "⬆️ Ingest", "⚠️ Exceptions", "🔗 TL links", "🔒 Period close", "📤 Export"])
+    tab_dash, tab_ingest, tab_exc, tab_links, tab_close, tab_export, tab_uploads = st.tabs(
+        ["📋 Dashboard", "⬆️ Ingest", "⚠️ Exceptions", "🔗 TL links", "🔒 Period close",
+         "📤 Export", "🗂️ Uploads"])
     c = conn()
 
     with tab_dash:
@@ -461,6 +462,44 @@ def render_hrbp():
                                        file_name="Attendance_Reconciled.xlsx",
                                        mime="application/vnd.openxmlformats-officedocument."
                                             "spreadsheetml.sheet")
+
+    with tab_uploads:
+        st.write("Every attendance upload and its cases. Remove a bad upload, or clear everything to "
+                 "start fresh. Reference data (managers, employees, links, vocabulary, login) is never "
+                 "touched here.")
+        uploads = data.list_uploads(c)
+        if not uploads:
+            st.info("No uploads yet.")
+        for up in uploads:
+            cols = st.columns([4, 1, 1, 1, 2])
+            when = up["created_at"].strftime("%Y-%m-%d %H:%M") if up["created_at"] else "—"
+            cols[0].write(f"**{up['source_filename'] or '—'}**  \n{when}")
+            cols[1].metric("cases", up["total"])
+            cols[2].metric("verified", up["verified"])
+            cols[3].metric("open", up["open"])
+            with cols[4]:
+                if up["verified"]:
+                    ack = st.checkbox(f"⚠️ delete {up['verified']} verified verdict(s)",
+                                      key=f"ack{up['id']}")
+                    typed = st.text_input("type REMOVE", key=f"rm{up['id']}",
+                                          label_visibility="collapsed", placeholder="type REMOVE")
+                    ready = ack and typed.strip() == "REMOVE"
+                else:
+                    ready = st.checkbox("confirm remove", key=f"ack{up['id']}")
+                if st.button("Remove upload", key=f"rmbtn{up['id']}", disabled=not ready):
+                    res = data.remove_upload(c, up["id"])
+                    st.success(f"Removed {res['cases_deleted']} case(s) "
+                               f"({res['verified_deleted']} verified).")
+                    st.rerun()
+
+        st.divider()
+        st.error("⚠️ **Clear everything & start fresh** — deletes ALL cases, exceptions, and uploads "
+                 "(keeps managers, employees, links, vocabulary, login). Cannot be undone.")
+        typed_all = st.text_input("To confirm, type  CLEAR  in capitals:", key="reset_all")
+        if st.button("Clear all case data", type="primary", disabled=(typed_all.strip() != "CLEAR")):
+            res = data.reset_all_cases(c)
+            st.success(f"Cleared {res['cases_deleted']} case(s). Start fresh with a new ingest.")
+            st.rerun()
 
 
 # ============================================================ ROUTER
