@@ -44,11 +44,11 @@ on conflict (crm) do update set
 # Upsert the ingested facts only; never touch verification state on an existing case.
 UPSERT_CASE = """
 insert into attendance.cases
-  (employee_id, manager_id, work_date, source_status, is_half_day)
+  (employee_id, manager_id, work_date, source_status, is_half_day, ingestion_run_id)
 values
   ((select id from attendance.employees where crm = %s),
    (select id from attendance.managers where crm = %s),
-   %s, %s, %s)
+   %s, %s, %s, %s)
 on conflict (employee_id, work_date) do update set
   source_status = excluded.source_status,
   is_half_day = excluded.is_half_day
@@ -76,8 +76,8 @@ def employee_params(e):
             e.manager_crm, e.sm_crm, e.employee_status, e.join_date, e.exit_date)
 
 
-def case_params(c):
-    return (c.employee_crm, c.manager_crm, c.work_date, c.source_status, c.is_half_day)
+def case_params(c, run_id):
+    return (c.employee_crm, c.manager_crm, c.work_date, c.source_status, c.is_half_day, run_id)
 
 
 @dataclass
@@ -105,7 +105,7 @@ def load_ingestion(db: DB, result, reference=None, source_filename=None, range_s
     total_exc = len(result.exceptions) + len(ref_excs)
     run_id = db.one(INSERT_RUN, (source_filename, range_start, range_end, triggered_by,
                                  len(result.cases), 0, total_exc))[0]
-    db.many(UPSERT_CASE, [case_params(c) for c in result.cases])
+    db.many(UPSERT_CASE, [case_params(c, run_id) for c in result.cases])
     exc_rows = [(run_id, e.crm, e.work_date, e.raw_value, e.reason) for e in result.exceptions]
     exc_rows += [(run_id, e.crm, None, e.detail, e.reason) for e in ref_excs]
     db.many(INSERT_EXCEPTION, exc_rows)

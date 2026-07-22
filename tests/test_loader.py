@@ -54,6 +54,8 @@ def test_load_ingestion_records_run_then_cases_then_exceptions(sample_workbook_w
     assert summary.exceptions == len(res.exceptions)
     # every exception row is linked to the run id
     assert all(row[0] == "run-xyz" for row in db.calls[2][2])
+    # every case row carries the owning run id (last element)
+    assert all(row[-1] == "run-xyz" for row in db.calls[1][2])
 
 
 def test_reference_exceptions_are_persisted_too(sample_workbook_with_summary):
@@ -73,4 +75,9 @@ def test_case_params_shape(sample_workbook_with_summary):
     ref = parse_reference(sample_workbook_with_summary)
     res = ingest_summary(sample_workbook_with_summary, ref, year=2026)
     c = next(c for c in res.cases if c.employee_crm == "E-1")
-    assert loader.case_params(c) == ("E-1", "TL-A", c.work_date, "Absent", False)
+    assert loader.case_params(c, "run-1") == ("E-1", "TL-A", c.work_date, "Absent", False, "run-1")
+
+
+def test_upsert_case_does_not_reassign_owning_run_on_conflict():
+    # Creator-owns: a re-ingest that re-touches a day must not steal the case's ingestion_run_id.
+    assert "ingestion_run_id = excluded" not in loader.UPSERT_CASE.lower()
