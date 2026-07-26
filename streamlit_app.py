@@ -427,6 +427,50 @@ def render_hrbp():
             if st.session_state.get(f"link{mgr['id']}"):
                 cols[4].code(st.session_state[f"link{mgr['id']}"], language=None)
 
+            # Void a TL's submitted verdicts so they can resubmit on their existing link.
+            with st.expander(f"↩︎ Void submitted cases — {mgr['name'] or mgr['crm']}"):
+                submitted = data.list_tl_submitted_cases(c, mgr["id"])
+                if not submitted:
+                    st.caption("Nothing finalized by this TL yet — nothing to void.")
+                else:
+                    st.caption("Voiding **reopens** the selected days and **permanently deletes** their "
+                               "attached proof. The TL's existing link still works — reopened days "
+                               "reappear as pending; use **Email**/**DingTalk** above to notify them.")
+                    select_all = st.checkbox("Select all", key=f"vall{mgr['id']}")
+                    picked = []
+                    for cs in submitted:
+                        hd = " · ½ day" if cs["is_half_day"] else ""
+                        verdict = VERDICT_LABEL.get(cs["manager_status"], cs["manager_status"] or "—")
+                        lbl = (f"{cs['employee_name']} · {cs['work_date']} · "
+                               f"flagged {cs['source_status']}{hd} → **{verdict}**")
+                        checked = st.checkbox(lbl, key=f"vc{cs['id']}")
+                        if select_all or checked:
+                            picked.append(cs["id"])
+                    reason = st.text_input("Reason (required)", key=f"vr{mgr['id']}")
+                    ack = st.checkbox("I understand the attached proof will be permanently deleted",
+                                      key=f"vack{mgr['id']}")
+                    ready = bool(picked and reason.strip() and ack)
+                    if st.button("Void selected — leader can resubmit",
+                                 key=f"vbtn{mgr['id']}", disabled=not ready):
+                        res = data.reopen_tl_cases(c, picked, actor, reason.strip())
+                        sc = storage_client()
+                        purged = failed = 0
+                        for p in res["attachment_paths"]:
+                            if sc is None:
+                                break
+                            try:
+                                sc.delete(p)
+                                purged += 1
+                            except Exception:  # noqa: BLE001 — orphaned private file is harmless
+                                failed += 1
+                        msg = f"Reopened {res['reopened']} case(s)."
+                        msg += f" Deleted {purged} file(s)." if purged else ""
+                        msg += f" {failed} file(s) couldn't be deleted (harmless)." if failed else ""
+                        msg += f" {res['skipped']} skipped (not TL-submitted)." if res["skipped"] else ""
+                        msg += " Now resend the link with Email/DingTalk above."
+                        st.success(msg)
+                        st.rerun()
+
     with tab_close:
         st.error("⚠️ **DANGER — this is NOT a 'save' or 'process' button.** It permanently closes "
                  "**every** open case as **Absent** and **cannot be undone**. Use it only at the very "
