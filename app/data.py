@@ -127,6 +127,62 @@ def submit_verdict(conn, case_id, manager_status, leave_type, comment, actor) ->
     return True
 
 
+# --------------------------------------------------------------------------- void / reopen (HRBP)
+def list_tl_submitted_cases(conn, manager_id):
+    """Cases this TL finalized themselves (closed_by='tl') — the set an HRBP may void."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "select c.id, c.work_date, c.source_status, c.is_half_day, c.manager_status, "
+            "       c.leave_type, c.manager_comment, "
+            "       e.name as employee_name, e.crm as employee_crm "
+            "from attendance.cases c join attendance.employees e on e.id = c.employee_id "
+            "where c.manager_id = %s and c.closed_by = 'tl' and c.status = 'closed' "
+            "order by e.name, c.work_date",
+            (manager_id,))
+        return cur.fetchall()
+
+
+def reopen_tl_cases(conn, case_ids, actor, reason) -> dict:
+    """Void a TL's submitted verdicts so they can resubmit on their existing link.
+
+    Reopens only cases the TL finalized themselves (closed_by='tl', status='closed'); any other
+    case in the list is skipped and counted. For each reopened case it nulls the verdict fields
+    (the exact inverse of submit_verdict), removes its attachment rows, and appends an audit entry.
+
+    Returns {'reopened': n, 'skipped': n, 'attachment_paths': [...]}. The paths are the storage
+    objects the caller should purge — storage lives outside this DB transaction.
+    """
+    if not case_ids:
+        return {"reopened": 0, "skipped": 0, "attachment_paths": []}
+    reopened = skipped = 0
+    paths = []
+    with conn.cursor(row_factory=dict_row) as cur:
+        for cid in case_ids:
+            cur.execute("select status, manager_status, final_status, leave_type, "
+                        "manager_comment, closed_by from attendance.cases where id = %s", (cid,))
+            old = cur.fetchone()
+            if old is None or old["closed_by"] != "tl" or old["status"] != "closed":
+                skipped += 1
+                continue
+            cur.execute("select storage_path from attendance.case_attachments where case_id = %s",
+                        (cid,))
+            paths.extend(r["storage_path"] for r in cur.fetchall())
+            cur.execute("delete from attendance.case_attachments where case_id = %s", (cid,))
+            cur.execute(
+                "update attendance.cases set status = 'open', manager_status = null, "
+                "final_status = null, leave_type = null, manager_comment = null, "
+                "manager_responded_at = null, closed_by = null, closed_at = null "
+                "where id = %s and closed_by = 'tl' and status = 'closed'", (cid,))
+            if cur.rowcount == 0:            # raced with another writer since the read
+                skipped += 1
+                continue
+            reopened += 1
+            _audit(cur, cid, actor, "hrbp_void", dict(old),
+                   {"status": "open", "reason": reason})
+    conn.commit()
+    return {"reopened": reopened, "skipped": skipped, "attachment_paths": paths}
+
+
 # --------------------------------------------------------------------------- cases (HRBP side)
 def list_cases(conn, status=None, team=None, manager_id=None):
     q = ("select c.id, c.work_date, c.source_status, c.status, c.manager_status, c.leave_type, "
