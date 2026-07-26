@@ -58,6 +58,14 @@ class StorageClient:
             raise StorageError(f"upload failed ({r.status_code}): {r.text}")
         return path
 
+    def delete(self, path: str) -> None:
+        """Remove one object from the private bucket (used when voiding a case's proof)."""
+        r = self._session().delete(
+            f"{self.url}/storage/v1/object/{self.bucket}/{path}",
+            headers=self._auth())
+        if getattr(r, "status_code", 200) >= 300:
+            raise StorageError(f"delete failed ({r.status_code}): {r.text}")
+
     def signed_url(self, path: str, expires_in: int = 3600) -> str:
         r = self._session().post(
             f"{self.url}/storage/v1/object/sign/{self.bucket}/{path}",

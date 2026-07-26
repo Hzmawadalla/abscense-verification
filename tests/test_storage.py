@@ -47,6 +47,10 @@ class _Http:
         self.calls.append({"url": url, "headers": headers, "data": data, "json": json})
         return self.resp
 
+    def delete(self, url, headers=None):
+        self.calls.append({"method": "delete", "url": url, "headers": headers})
+        return self.resp
+
 
 def test_signed_url_builds_full_url():
     http = _Http(_Resp(200, {"signedURL": "/object/sign/case-attachments/x?token=abc"}))
@@ -60,3 +64,19 @@ def test_upload_raises_on_error_status():
     c = storage.StorageClient("https://proj.supabase.co", "svc", http=http)
     with pytest.raises(storage.StorageError):
         c.upload("case-1/x.pdf", b"data", "application/pdf")
+
+
+def test_delete_calls_object_endpoint_and_succeeds():
+    http = _Http(_Resp(200))
+    c = storage.StorageClient("https://proj.supabase.co", "svc", http=http)
+    c.delete("case-1/x.pdf")
+    assert http.calls[-1]["method"] == "delete"
+    assert http.calls[-1]["url"] == \
+        "https://proj.supabase.co/storage/v1/object/case-attachments/case-1/x.pdf"
+
+
+def test_delete_raises_on_error_status():
+    http = _Http(_Resp(404, text="not found"))
+    c = storage.StorageClient("https://proj.supabase.co", "svc", http=http)
+    with pytest.raises(storage.StorageError):
+        c.delete("case-1/missing.pdf")
