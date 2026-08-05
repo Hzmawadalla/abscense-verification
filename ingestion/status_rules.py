@@ -22,6 +22,10 @@ TRIGGER_EXACT = {"absent", "no show"}
 KNOWN_NOISE = {"#n/a", "0", "departed", "active", "resigned"}
 ANNOTATIONS = ("to be confirmed", "to be deducted", "deducted from balance",
                "pending", "failed", "returned", "applied on leave", "- check")
+# Pending/Failed/Returned on an already-coded leave is HR's own workflow state, not a TL
+# attendance dispute -> skip instead of trigger. Only applies when the base word is a
+# recognized leave type; non-leave bases (e.g. a bare "Pending") keep triggering.
+LEAVE_UNRESOLVED_SKIP = {"pending", "failed", "returned"}
 
 # Curated manual classifications for values that aren't algorithmically derivable
 # (freeform notes / shorthand). Keyed on normalized raw value; checked first.
@@ -57,8 +61,11 @@ def classify(raw):
     # Public holidays are org-wide, never a per-employee TL verification.
     if b == "public holiday":
         return ("skip", "Public Holiday", is_hd)
-    # Explicit mid-dispute / failed annotations -> verify.
+    # Explicit mid-dispute / failed annotations -> verify, except a coded leave whose
+    # annotation is just Pending/Failed/Returned (HR workflow noise, not a TL dispute).
     if any(k in n for k in ANNOTATIONS):
+        if b in SKIP_LEAVES and any(k in n for k in LEAVE_UNRESOLVED_SKIP):
+            return ("skip", b.title() or None, is_hd)
         return ("trigger", b.title() or None, is_hd)
     if b in TRIGGER_EXACT:
         return ("trigger", b.title(), is_hd)

@@ -8,11 +8,15 @@ from ingestion.status_rules import classify
     # genuine unexplained absence
     ("Absent", "trigger"),
     ("No Show", "trigger"),
-    # unconfirmed / failed leaves -> verify
-    ("Annual Leave (Failed)", "trigger"),
+    # unconfirmed leaves still under HR review -> verify
     ("Annual Leave - To Be Confirmed", "trigger"),
-    ("Sick Leave (Returned)", "trigger"),
     ("Bereavement Leave - To Be confirmed", "trigger"),
+    # coded leave annotated Pending/Failed/Returned -> HR workflow noise, not a TL dispute -> skip
+    ("Annual Leave (Failed)", "skip"),
+    ("Annual Leave (Pending)", "skip"),
+    ("Sick Leave (Returned)", "skip"),
+    # same annotation on a non-leave base still triggers (e.g. a bare approval-pending status)
+    ("Leave Approval Pending", "trigger"),
     # clean approved states -> skip
     ("Normal", "skip"),
     ("Weekend", "skip"),

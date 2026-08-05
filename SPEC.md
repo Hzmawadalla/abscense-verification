@@ -58,22 +58,26 @@ and looks it up in the `status_vocabulary` table. Every raw value maps to exactl
 and **all clean coded leaves**: `Annual Leave`, `Sick Leave`, `Casual Leave`,
 `Continuing Education Leave`, `Paternity Leave`, `Bereavement Leave`, `Unpaid Leave`
 (and their `(HD)` variants). A clean `Unpaid Leave` is still an *approved* code (just unpaid),
-so it skips; only `Unpaid Leave (Failed)` triggers.
+so it skips. A coded leave annotated `(Pending)`, `(Failed)`, or `(Returned)` also skips —
+those are HR's own leave-workflow states, not something a TL needs to confirm (decision
+2026-08-05; previously these triggered).
 
 ### NOT VERIFIED THIS STAGE — deduct as-coded, no case
 `Late`, `Missing Punch Out`, `Half Day` (incl. `Halfday`/`Hlaf day`), `2 Hour Excuse`, `Excuse`.
 (They still drive payroll deductions; they just don't reach a TL at this stage.)
 
 ### TRIGGER — create a verification case
-`Absent`, `No Show`, **all `(Failed)` variants**, and **all mid-dispute annotations**:
+`Absent`, `No Show`, and **mid-dispute annotations that are still an open question**:
 `… - To Be Confirmed`, `… - Check`, `Leave Approval Pending`, `… To Be deducted from Balance`,
-`Applied on leave on <date>`, `Sick Leave (Returned)`.
+`Applied on leave on <date>`. A non-leave base annotated `Pending` (e.g. `Leave Approval
+Pending`) still triggers — the carve-out below only applies to a recognized coded leave.
 
 > Rule of thumb (this stage): **verify only a genuine unexplained absence (`Absent`/`No Show`)
-> or a leave that is explicitly unconfirmed/failed.** Everything already coded as an approved
-> state — approved leaves (incl. clean `Unpaid Leave`) and minor partial-day deductions
-> (`Late`, `Half Day`, `2 Hour Excuse`) — is trusted as-is. The annotation suffix (`(Failed)`,
-> `To Be Confirmed`, `Check`) is the "not resolved" signal, independent of the base word.
+> or a leave that is explicitly still an open dispute (`To Be Confirmed`, `Check`,
+> `To Be deducted from Balance`).** Everything already coded as an approved state — approved
+> leaves (incl. clean `Unpaid Leave`), a coded leave merely `Pending`/`Failed`/`Returned` in
+> HR's workflow, and minor partial-day deductions (`Late`, `Half Day`, `2 Hour Excuse`) — is
+> trusted as-is and never reaches a TL.
 
 ### EXCEPTIONS — route to review queue, NEVER a case
 `Departed` (also excluded via `HC.Employee Status`), `#N/A`, `0`, bare `1/2/3`, stray names

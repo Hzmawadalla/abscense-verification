@@ -36,10 +36,18 @@ def test_clean_and_approved_leave_days_create_no_case(sample_workbook_with_summa
     assert {c.work_date for c in _cases_for(res, "E-1")} == {datetime.date(2026, 5, 6)}
 
 
-def test_failed_leave_and_annotation_trigger_cases(sample_workbook_with_summary):
+def test_failed_leave_is_skipped_not_cased(sample_workbook_with_summary):
+    # E-2's 07-May "Annual Leave (Failed)" is HR workflow state, not a TL dispute -> no case.
     res = _ingest(sample_workbook_with_summary)
     dates = {c.work_date for c in _cases_for(res, "E-2")}
-    assert dates == {datetime.date(2026, 5, 7), datetime.date(2026, 5, 8)}
+    assert datetime.date(2026, 5, 7) not in dates
+
+
+def test_mid_dispute_annotation_triggers_case(sample_workbook_with_summary):
+    # 08-May "Unpaid Leave (HD) - To Be Confirmed" is still an open dispute -> case.
+    res = _ingest(sample_workbook_with_summary)
+    dates = {c.work_date for c in _cases_for(res, "E-2")}
+    assert dates == {datetime.date(2026, 5, 8)}
 
 
 def test_half_day_flag_parsed_from_annotation(sample_workbook_with_summary):
