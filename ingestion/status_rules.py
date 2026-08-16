@@ -20,8 +20,9 @@ SKIP_LEAVES = {
 NOT_VERIFIED = {"late", "missing punch out", "half day", "halfday", "hlaf day", "2 hour excuse", "excuse"}
 TRIGGER_EXACT = {"absent", "no show"}
 KNOWN_NOISE = {"#n/a", "0", "departed", "active", "resigned"}
-ANNOTATIONS = ("to be confirmed", "to be deducted", "deducted from balance",
-               "pending", "failed", "returned", "applied on leave", "- check")
+# Balance-deduction wording is deliberately absent: the "deducted"/"from balance" branch in
+# classify() runs first and skips those values, so listing them here would never be reached.
+ANNOTATIONS = ("to be confirmed", "pending", "failed", "returned", "applied on leave", "- check")
 # Pending/Failed/Returned on an already-coded leave is HR's own workflow state, not a TL
 # attendance dispute -> skip instead of trigger. Only applies when the base word is a
 # recognized leave type; non-leave bases (e.g. a bare "Pending") keep triggering.
