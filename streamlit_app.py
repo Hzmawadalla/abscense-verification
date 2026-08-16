@@ -17,6 +17,7 @@ from app.dingtalk import DingTalkClient
 from app.mailer import SMTPMailer
 from app.report import build_links_workbook, build_reconciled_report
 from app.storage import StorageClient, object_path, validate_upload
+from app.version import build_stamp
 from ingestion import loader
 from ingestion.config import load_aliases, load_dingtalk_ids
 from ingestion.db_psycopg import PsycopgDB
@@ -238,6 +239,9 @@ def render_hrbp():
     with st.sidebar:
         st.write(f"Signed in as **{st.session_state.get('name')}**")
         authenticator.logout("Log out", "sidebar")
+        # Which commit this container is serving — compare against `git rev-parse --short
+        # origin/master` to tell a current deploy from a warm container running stale code.
+        st.caption(build_stamp())
 
     tab_dash, tab_ingest, tab_exc, tab_links, tab_close, tab_export, tab_uploads = st.tabs(
         ["📋 Dashboard", "⬆️ Ingest", "⚠️ Exceptions", "🔗 TL links", "🔒 Period close",

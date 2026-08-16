@@ -16,4 +16,4 @@ pyarrow==24.0.0
 pillow==12.3.0
 cryptography==49.0.0
 protobuf==7.35.1
-# rev: leave Pending/Failed/Returned carve-out (d2f6d69)
+# rev: build stamp in the HRBP sidebar
