@@ -43,7 +43,8 @@ secrets, and note the app URL back into `APP_BASE_URL`.
 1. **Ingest** tab → upload the attendance workbook, set the year → *Parse & load*.
 2. **Exceptions** tab → work the list (esp. `unmapped_employee` → fix `Structure`, re-upload).
 3. **TL links** tab → *Send to ALL with open cases* (DingTalk DMs each TL their link).
-4. TLs open their link, confirm Present / On Leave / Absent (+ comment/attachment).
+4. TLs open their link, confirm Present or Absent. **Present requires a CRM-calls screenshot** —
+   without one the case is rejected and stays open. Requires object storage to be configured.
 5. **Dashboard** tab → resolve responded cases (close as-is / override).
 6. **Period close** tab → stand remaining open cases as Absent at cutoff.
 7. Export closed cases (join back on `CRM + work_date`) into payroll.
