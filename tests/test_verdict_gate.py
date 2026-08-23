@@ -5,7 +5,8 @@ must be backed by a screenshot of that employee's CRM calls for the day; Absent 
 original flag and needs nothing. Cases that fail the gate are never written, so they stay
 open and the TL can resubmit on the same link.
 """
-from app.verdicts import VERDICT_LABEL, VERDICTS, blocked_cases, is_blocked
+from app.verdicts import (SELECT_PLACEHOLDER, VERDICT_LABEL, VERDICTS, blocked_cases,
+                          is_blocked, unanswered, verdict_choices)
 
 
 def test_tl_can_only_choose_present_or_absent():
@@ -25,6 +26,32 @@ def test_labels_still_resolve_retired_leave_codes():
 def test_labels_resolve_the_two_live_codes():
     assert VERDICT_LABEL["present"] == "Present"
     assert VERDICT_LABEL["absent"] == "Absent"
+
+
+def test_dropdown_leads_with_the_placeholder_so_nothing_is_preselected():
+    assert verdict_choices() == [SELECT_PLACEHOLDER, "Present", "Absent"]
+
+
+def test_placeholder_is_not_an_assignable_verdict():
+    assert SELECT_PLACEHOLDER not in VERDICTS
+
+
+def test_unanswered_case_raises_no_proof_alert():
+    # Nothing is chosen yet, so the page must not open covered in red warnings.
+    assert is_blocked(None, has_proof=False) is False
+
+
+def test_unanswered_case_is_never_blocked():
+    assert blocked_cases({7: (None, False)}) == []
+
+
+def test_unanswered_lists_cases_with_no_verdict_chosen():
+    selections = {1: ("present", True), 2: (None, False), 3: ("absent", False), 4: (None, True)}
+    assert unanswered(selections) == [2, 4]
+
+
+def test_unanswered_is_empty_when_every_case_is_answered():
+    assert unanswered({1: ("present", True), 2: ("absent", False)}) == []
 
 
 def test_is_blocked_flags_present_without_proof():

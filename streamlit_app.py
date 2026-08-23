@@ -17,7 +17,8 @@ from app.dingtalk import DingTalkClient
 from app.mailer import SMTPMailer
 from app.report import build_links_workbook, build_reconciled_report
 from app.storage import StorageClient, object_path, validate_upload
-from app.verdicts import PROOF_REQUIRED, VERDICT_LABEL, VERDICTS, blocked_cases, is_blocked
+from app.verdicts import (PROOF_REQUIRED, VERDICT_LABEL, VERDICTS, blocked_cases, is_blocked,
+                          unanswered, verdict_choices)
 from app.version import build_stamp
 from ingestion import loader
 from ingestion.config import load_aliases, load_dingtalk_ids
@@ -145,6 +146,10 @@ def render_tl(token: str):
     if rejected:
         st.error(rejected)
 
+    still_open = st.session_state.pop("tl_unanswered", None)  # never answered, survives the rerun
+    if still_open:
+        st.warning(still_open)
+
     cases = data.open_cases_for_manager(c, mgr["id"])
     pending = [cs for cs in cases if cs["status"] == "open"]        # not yet validated — editable
     done = [cs for cs in cases if cs["status"] == "manager_responded"]  # validated once — locked
@@ -171,11 +176,11 @@ def render_tl(token: str):
             st.markdown(f"**{cs['employee_name']}** · `{cs['employee_crm']}` — {cs['work_date']} · "
                         f"flagged as *{cs['source_status']}*{hd}")
             col1, col2 = st.columns([1, 2])
-            verdict = col1.selectbox("Verdict", list(VERDICTS.keys()), key=f"v{cs['id']}")
+            verdict = col1.selectbox("Verdict", verdict_choices(), key=f"v{cs['id']}")
             comment = col2.text_input("Comment (optional)", key=f"c{cs['id']}")
             upl = col2.file_uploader("CRM calls screenshot — required to mark Present",
                                      type=["png", "jpg", "jpeg", "pdf"], key=f"f{cs['id']}")
-            code = VERDICTS[verdict]
+            code = VERDICTS.get(verdict)  # None while the case is still on the placeholder
             has_proof = upl is not None and sc is not None
             if is_blocked(code, has_proof):  # same rule the submit gate applies — never diverges
                 st.error("⚠️ **Please upload a screenshot of the employee's CRM Call Duration for "
@@ -190,9 +195,10 @@ def render_tl(token: str):
             # never submitted, so the case stays 'open' and the TL can attach proof and resubmit
             # on this same link. dict (not set) to keep the blocked order stable.
             blocked = dict.fromkeys(blocked_cases(gate))
+            skipped = dict.fromkeys(unanswered(gate))  # never answered — not a rejection
             ok = stale = files = 0
             for cid, (ms, cm, upl) in choices.items():
-                if cid in blocked:
+                if cid in blocked or cid in skipped:
                     continue
                 if upl is not None and sc is not None:
                     # Store the proof BEFORE the verdict: submit_verdict closes the case one-way,
@@ -211,25 +217,35 @@ def render_tl(token: str):
                     stale += 1  # already validated or closed since the page loaded
                     continue
                 ok += 1
+            by_id = {cs["id"]: cs for cs in pending}
+
+            def name_lines(ids):
+                return "\n".join(f"- **{by_id.get(i, {}).get('employee_name', i)}** — "
+                                 f"{by_id.get(i, {}).get('work_date', '')}" for i in ids)
+
             if blocked:
-                by_id = {cs["id"]: cs for cs in pending}
-                lines = [f"- **{by_id.get(cid, {}).get('employee_name', cid)}** — "
-                         f"{by_id.get(cid, {}).get('work_date', '')}" for cid in blocked]
                 st.session_state["tl_rejected"] = (
                     "**Not saved — a CRM calls screenshot is required to mark someone Present.** "
                     "These days are still open; attach the screenshot and submit again:\n"
-                    + "\n".join(lines))
+                    + name_lines(blocked))
+            if skipped:
+                st.session_state["tl_unanswered"] = (
+                    "**You haven't answered these yet.** Choose Present or Absent for each, then "
+                    "submit again:\n" + name_lines(skipped))
             msg = f"Saved {ok} response(s)."
             msg += f" {files} attachment(s)." if files else ""
             msg += f" {stale} were already submitted or closed." if stale else ""
             if ok or stale:
                 st.session_state["tl_thanks"] = msg  # shown after the rerun (top of render_tl)
                 st.rerun()
-            # Nothing landed — skip the rerun so the rejection notice and the TL's own picks
-            # stay on screen instead of being cleared by a fresh page.
-            notice = st.session_state.pop("tl_rejected", None)
-            if notice:
-                st.error(notice)
+            # Nothing landed — skip the rerun so the notices and the TL's own picks stay on
+            # screen instead of being cleared by a fresh page.
+            rejected_now = st.session_state.pop("tl_rejected", None)
+            if rejected_now:
+                st.error(rejected_now)
+            unanswered_now = st.session_state.pop("tl_unanswered", None)
+            if unanswered_now:
+                st.warning(unanswered_now)
     else:
         st.success("You've validated all your cases — thank you!")
 

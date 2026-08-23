@@ -33,8 +33,27 @@ VERDICT_LABEL: dict[str, str] = {
 # Verdict codes that a TL must evidence with a CRM-calls screenshot.
 PROOF_REQUIRED: frozenset[str] = frozenset({"present"})
 
+# Leading dropdown entry, so no verdict is pre-selected. Without it the first real option would
+# be chosen on load — the TL could submit an answer they never consciously made, and every case
+# would open showing the "attach a screenshot" alert. Maps to a None code, never to an enum value.
+SELECT_PLACEHOLDER: str = "Select…"
 
-def is_blocked(code: str, has_proof: bool) -> bool:
+
+def verdict_choices() -> list[str]:
+    """Dropdown options for the TL page: the placeholder first, then the assignable verdicts."""
+    return [SELECT_PLACEHOLDER, *VERDICTS]
+
+
+def unanswered(selections: dict[int, tuple[str | None, bool]]) -> list[int]:
+    """Case ids still sitting on the placeholder. Same `selections` shape as `blocked_cases`.
+
+    These are not rejections — the TL simply hasn't answered yet — so they are skipped on
+    submit and reported separately from the cases refused for missing proof.
+    """
+    return [cid for cid, (code, _has_proof) in selections.items() if code is None]
+
+
+def is_blocked(code: str | None, has_proof: bool) -> bool:
     """Whether one answer asserts attendance without evidence, and so must not be written.
 
     Single source of truth for the gate: the TL page warns with this while the form is being
@@ -44,10 +63,11 @@ def is_blocked(code: str, has_proof: bool) -> bool:
     return code in PROOF_REQUIRED and not has_proof
 
 
-def blocked_cases(selections: dict[int, tuple[str, bool]]) -> list[int]:
+def blocked_cases(selections: dict[int, tuple[str | None, bool]]) -> list[int]:
     """Case ids that must NOT be written because they assert attendance without evidence.
 
-    `selections` maps case id -> (verdict code, whether a usable screenshot is attached).
+    `selections` maps case id -> (verdict code or None if unanswered, whether a usable
+    screenshot is attached). Unanswered cases are not blocked — see `unanswered`.
     Returns the blocked ids in selection order; the caller submits everything else and leaves
     these cases open so the TL can attach proof and resubmit.
     """
