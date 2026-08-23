@@ -5,7 +5,7 @@ must be backed by a screenshot of that employee's CRM calls for the day; Absent 
 original flag and needs nothing. Cases that fail the gate are never written, so they stay
 open and the TL can resubmit on the same link.
 """
-from app.verdicts import VERDICT_LABEL, VERDICTS, blocked_cases
+from app.verdicts import VERDICT_LABEL, VERDICTS, blocked_cases, is_blocked
 
 
 def test_tl_can_only_choose_present_or_absent():
@@ -25,6 +25,28 @@ def test_labels_still_resolve_retired_leave_codes():
 def test_labels_resolve_the_two_live_codes():
     assert VERDICT_LABEL["present"] == "Present"
     assert VERDICT_LABEL["absent"] == "Absent"
+
+
+def test_is_blocked_flags_present_without_proof():
+    assert is_blocked("present", has_proof=False) is True
+
+
+def test_is_blocked_clears_present_with_proof():
+    assert is_blocked("present", has_proof=True) is False
+
+
+def test_is_blocked_never_flags_absent():
+    assert is_blocked("absent", has_proof=False) is False
+    assert is_blocked("absent", has_proof=True) is False
+
+
+def test_batch_gate_agrees_with_the_single_case_predicate():
+    # The TL page warns per case with is_blocked() and rejects per batch with blocked_cases().
+    # If these ever diverged, a case could pass the warning and still be refused on submit.
+    selections = {1: ("present", True), 2: ("present", False),
+                  3: ("absent", False), 4: ("absent", True)}
+    assert blocked_cases(selections) == [cid for cid, (code, proof) in selections.items()
+                                         if is_blocked(code, proof)]
 
 
 def test_present_without_proof_is_blocked():

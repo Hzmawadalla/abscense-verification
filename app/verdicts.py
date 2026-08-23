@@ -34,6 +34,16 @@ VERDICT_LABEL: dict[str, str] = {
 PROOF_REQUIRED: frozenset[str] = frozenset({"present"})
 
 
+def is_blocked(code: str, has_proof: bool) -> bool:
+    """Whether one answer asserts attendance without evidence, and so must not be written.
+
+    Single source of truth for the gate: the TL page warns with this while the form is being
+    filled in, and rejects with `blocked_cases` on submit. Sharing the rule keeps the warning
+    and the rejection from ever disagreeing.
+    """
+    return code in PROOF_REQUIRED and not has_proof
+
+
 def blocked_cases(selections: dict[int, tuple[str, bool]]) -> list[int]:
     """Case ids that must NOT be written because they assert attendance without evidence.
 
@@ -41,5 +51,4 @@ def blocked_cases(selections: dict[int, tuple[str, bool]]) -> list[int]:
     Returns the blocked ids in selection order; the caller submits everything else and leaves
     these cases open so the TL can attach proof and resubmit.
     """
-    return [cid for cid, (code, has_proof) in selections.items()
-            if code in PROOF_REQUIRED and not has_proof]
+    return [cid for cid, (code, has_proof) in selections.items() if is_blocked(code, has_proof)]
