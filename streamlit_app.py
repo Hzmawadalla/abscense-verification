@@ -429,7 +429,13 @@ def render_hrbp():
                 if no_email:
                     msg += f" {len(no_email)} TL(s) skipped — no email on file."
                 (st.success if not fail else st.warning)(msg)
-        if client and bulk[1].button("📨 DingTalk to all TLs with open cases"):
+        # DingTalk sending is disarmed by default: current practice is manual link distribution,
+        # and one stray click would DM every TL irreversibly. Ticking the box arms the button.
+        dt_armed = client is not None and bulk[1].checkbox(
+            "Enable DingTalk sending", key="dt_armed",
+            help="Off by default. Tick this to arm the bulk DingTalk send, then press the button.")
+        if client and bulk[1].button("📨 DingTalk to all TLs with open cases",
+                                     disabled=not dt_armed):
             sent = fail = 0
             for mgr in overview:
                 if mgr["dingtalk_userid"] and mgr["open_cases"]:
