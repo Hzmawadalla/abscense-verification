@@ -34,8 +34,10 @@ link, and lets **HRBP** close or override before results merge back into payroll
    - **Link** button — copy one link at a time.
    - Send **once** — see Critical Rule #2.
 
-5. **TLs verify** — each opens their link and confirms every flagged day
-   (Present / Annual Leave / Unpaid Leave / Sick Leave / Absent / Half Day). One submission per case.
+5. **TLs verify** — each opens their link and confirms every flagged day as **Present** or
+   **Absent**. One submission per case. Marking a day **Present** requires attaching a screenshot
+   of that employee's CRM calls for the day; without it the case is rejected and stays open for
+   the TL to resubmit. **Absent** needs no attachment.
 
 6. **Resolve responded cases** (📋 Dashboard tab)
    - Review each TL verdict → **Close as-is** or **Override & close** (override needs a reason).
@@ -108,7 +110,12 @@ link, and lets **HRBP** close or override before results merge back into payroll
 ## Reference
 
 ### Verdicts (TL & HRBP)
-`Present` · `Annual Leave` · `Unpaid Leave` · `Sick Leave` · `Absent` · `Half Day`
+`Present` · `Absent`
+> **Present** must be backed by a CRM-calls screenshot; the app refuses to save it otherwise.
+>
+> The retired codes `annual_leave` · `unpaid_leave` · `sick_leave` · `half_day` · `leave` can no
+> longer be assigned, but remain in the Postgres enum (Postgres cannot cleanly drop an enum value)
+> and still render with their old labels on cases closed before the change.
 > Half-day / sick-leave flow into the export as labels — the actual pay math is a manual
 > downstream step.
 

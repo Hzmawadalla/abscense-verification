@@ -17,6 +17,8 @@ from app.dingtalk import DingTalkClient
 from app.mailer import SMTPMailer
 from app.report import build_links_workbook, build_reconciled_report
 from app.storage import StorageClient, object_path, validate_upload
+from app.verdicts import (PROOF_REQUIRED, VERDICT_LABEL, VERDICTS, blocked_cases, is_blocked,
+                          unanswered, verdict_choices)
 from app.version import build_stamp
 from ingestion import loader
 from ingestion.config import load_aliases, load_dingtalk_ids
@@ -32,18 +34,8 @@ _enc_key = st.secrets.get("TOKEN_ENC_KEY", os.environ.get("TOKEN_ENC_KEY"))
 if _enc_key:
     os.environ["TOKEN_ENC_KEY"] = _enc_key
 
-# Verdict dropdown (label -> stored enum code), shared by the TL page and HRBP override.
-VERDICTS = {
-    "Present": "present",
-    "Annual Leave": "annual_leave",
-    "Unpaid Leave": "unpaid_leave",
-    "Sick Leave": "sick_leave",
-    "Absent": "absent",
-    "Half Day": "half_day",
-}
-# Reverse map for display/export; includes the legacy 'leave' value for any historical rows.
-VERDICT_LABEL = {code: label for label, code in VERDICTS.items()}
-VERDICT_LABEL["leave"] = "On Leave"
+# VERDICTS (label -> stored enum code) and VERDICT_LABEL (code -> label, incl. retired leave
+# codes) live in app/verdicts.py so the CRM-proof gate can be unit-tested without Streamlit.
 
 
 @st.cache_resource
@@ -150,6 +142,14 @@ def render_tl(token: str):
                    else "✅ Thanks for your submission!")
         st.caption(thanks)
 
+    rejected = st.session_state.pop("tl_rejected", None)  # unproven Present days, survives the rerun
+    if rejected:
+        st.error(rejected)
+
+    still_open = st.session_state.pop("tl_unanswered", None)  # never answered, survives the rerun
+    if still_open:
+        st.warning(still_open)
+
     cases = data.open_cases_for_manager(c, mgr["id"])
     pending = [cs for cs in cases if cs["status"] == "open"]        # not yet validated — editable
     done = [cs for cs in cases if cs["status"] == "manager_responded"]  # validated once — locked
@@ -160,42 +160,92 @@ def render_tl(token: str):
     if pending:
         st.write(f"**{len(pending)}** case(s) awaiting your confirmation. "
                  "Each can be submitted **once** — review carefully before submitting.")
-        with st.form("verify"):
-            choices = {}
-            for cs in pending:
-                hd = " · ½ day" if cs["is_half_day"] else ""
-                st.markdown(f"**{cs['employee_name']}** · `{cs['employee_crm']}` — {cs['work_date']} · "
-                            f"flagged as *{cs['source_status']}*{hd}")
-                col1, col2 = st.columns([1, 2])
-                verdict = col1.selectbox("Verdict", list(VERDICTS.keys()), key=f"v{cs['id']}")
-                comment = col2.text_input("Comment (evidence, e.g. approved leave email)",
-                                          key=f"c{cs['id']}")
-                upl = col2.file_uploader("Attach proof (pdf/jpg/png)", type=["pdf", "jpg", "jpeg", "png"],
-                                         key=f"f{cs['id']}")
-                choices[cs["id"]] = (VERDICTS[verdict], None, comment, upl)
-                st.divider()
-            if st.form_submit_button("Submit all", type="primary"):
-                actor = f"tl:{mgr['crm']}"
-                sc = storage_client()
-                ok = stale = files = 0
-                for cid, (ms, lt, cm, upl) in choices.items():
-                    if not data.submit_verdict(c, cid, ms, lt, cm, actor):
-                        stale += 1  # already validated or closed since the page loaded
-                        continue
-                    ok += 1
-                    if upl is not None and sc is not None:
-                        try:
-                            validate_upload(upl.type, upl.size)
-                            path = sc.upload(object_path(cid, upl.name), upl.getvalue(), upl.type)
-                            data.add_attachment(c, cid, path, upl.name, upl.type, upl.size)
-                            files += 1
-                        except Exception as e:  # noqa: BLE001 — show the TL why an attachment didn't stick
-                            st.warning(f"Attachment for one case failed: {e}")
-                msg = f"Saved {ok} response(s)."
-                msg += f" {files} attachment(s)." if files else ""
-                msg += f" {stale} were already submitted or closed." if stale else ""
-                st.session_state["tl_thanks"] = msg  # shown after the rerun (see top of render_tl)
+        st.info("Marking a day **Present** requires a screenshot of that employee's CRM calls "
+                "for the day. **Absent** needs no attachment.")
+        sc = storage_client()
+        if sc is None:
+            st.error("Attachments are unavailable right now, so days cannot be marked Present. "
+                     "Please contact HR before submitting.")
+        # Deliberately NOT an st.form: form widgets don't rerun on change, so the "upload a
+        # screenshot" alert below could never appear until submit. Plain widgets rerun the script
+        # on every edit, which is what makes the warning live. Values are read back from the
+        # widgets on the run where "Submit all" is pressed.
+        choices, gate = {}, {}
+        for cs in pending:
+            hd = " · ½ day" if cs["is_half_day"] else ""
+            st.markdown(f"**{cs['employee_name']}** · `{cs['employee_crm']}` — {cs['work_date']} · "
+                        f"flagged as *{cs['source_status']}*{hd}")
+            col1, col2 = st.columns([1, 2])
+            verdict = col1.selectbox("Verdict", verdict_choices(), key=f"v{cs['id']}")
+            comment = col2.text_input("Comment (optional)", key=f"c{cs['id']}")
+            upl = col2.file_uploader("CRM calls screenshot — required to mark Present",
+                                     type=["png", "jpg", "jpeg", "pdf"], key=f"f{cs['id']}")
+            code = VERDICTS.get(verdict)  # None while the case is still on the placeholder
+            has_proof = upl is not None and sc is not None
+            if is_blocked(code, has_proof):  # same rule the submit gate applies — never diverges
+                st.error("⚠️ **Please upload a screenshot of the employee's CRM Call Duration for "
+                         "that day** — otherwise this employee will be considered **Absent**.")
+            choices[cs["id"]] = (code, comment, upl)
+            gate[cs["id"]] = (code, has_proof)
+            st.divider()
+
+        if st.button("Submit all", type="primary"):
+            actor = f"tl:{mgr['crm']}"
+            # Gate first, write second. A Present verdict without a CRM screenshot behind it is
+            # never submitted, so the case stays 'open' and the TL can attach proof and resubmit
+            # on this same link. dict (not set) to keep the blocked order stable.
+            blocked = dict.fromkeys(blocked_cases(gate))
+            skipped = dict.fromkeys(unanswered(gate))  # never answered — not a rejection
+            ok = stale = files = 0
+            for cid, (ms, cm, upl) in choices.items():
+                if cid in blocked or cid in skipped:
+                    continue
+                if upl is not None and sc is not None:
+                    # Store the proof BEFORE the verdict: submit_verdict closes the case one-way,
+                    # so a failure here must not leave it locked without evidence.
+                    try:
+                        validate_upload(upl.type, upl.size)
+                        path = sc.upload(object_path(cid, upl.name), upl.getvalue(), upl.type)
+                        data.add_attachment(c, cid, path, upl.name, upl.type, upl.size)
+                        files += 1
+                    except Exception as e:  # noqa: BLE001 — show the TL why an attachment didn't stick
+                        if ms in PROOF_REQUIRED:
+                            blocked[cid] = None  # unproven Present — leave it open
+                            continue
+                        st.warning(f"Attachment for one case failed: {e}")
+                if not data.submit_verdict(c, cid, ms, None, cm, actor):
+                    stale += 1  # already validated or closed since the page loaded
+                    continue
+                ok += 1
+            by_id = {cs["id"]: cs for cs in pending}
+
+            def name_lines(ids):
+                return "\n".join(f"- **{by_id.get(i, {}).get('employee_name', i)}** — "
+                                 f"{by_id.get(i, {}).get('work_date', '')}" for i in ids)
+
+            if blocked:
+                st.session_state["tl_rejected"] = (
+                    "**Not saved — a CRM calls screenshot is required to mark someone Present.** "
+                    "These days are still open; attach the screenshot and submit again:\n"
+                    + name_lines(blocked))
+            if skipped:
+                st.session_state["tl_unanswered"] = (
+                    "**You haven't answered these yet.** Choose Present or Absent for each, then "
+                    "submit again:\n" + name_lines(skipped))
+            msg = f"Saved {ok} response(s)."
+            msg += f" {files} attachment(s)." if files else ""
+            msg += f" {stale} were already submitted or closed." if stale else ""
+            if ok or stale:
+                st.session_state["tl_thanks"] = msg  # shown after the rerun (top of render_tl)
                 st.rerun()
+            # Nothing landed — skip the rerun so the notices and the TL's own picks stay on
+            # screen instead of being cleared by a fresh page.
+            rejected_now = st.session_state.pop("tl_rejected", None)
+            if rejected_now:
+                st.error(rejected_now)
+            unanswered_now = st.session_state.pop("tl_unanswered", None)
+            if unanswered_now:
+                st.warning(unanswered_now)
     else:
         st.success("You've validated all your cases — thank you!")
 
@@ -379,7 +429,13 @@ def render_hrbp():
                 if no_email:
                     msg += f" {len(no_email)} TL(s) skipped — no email on file."
                 (st.success if not fail else st.warning)(msg)
-        if client and bulk[1].button("📨 DingTalk to all TLs with open cases"):
+        # DingTalk sending is disarmed by default: current practice is manual link distribution,
+        # and one stray click would DM every TL irreversibly. Ticking the box arms the button.
+        dt_armed = client is not None and bulk[1].checkbox(
+            "Enable DingTalk sending", key="dt_armed",
+            help="Off by default. Tick this to arm the bulk DingTalk send, then press the button.")
+        if client and bulk[1].button("📨 DingTalk to all TLs with open cases",
+                                     disabled=not dt_armed):
             sent = fail = 0
             for mgr in overview:
                 if mgr["dingtalk_userid"] and mgr["open_cases"]:
