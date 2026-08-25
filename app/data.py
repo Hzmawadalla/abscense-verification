@@ -342,6 +342,22 @@ def list_attachments(conn, case_id):
         return cur.fetchall()
 
 
+def attachments_for_cases(conn, case_ids):
+    """Every attachment for the given cases, in one query.
+
+    The HRBP evidence view renders many cases at once; fetching per case would be an N+1.
+    Returns flat rows carrying case_id — see `app.attachments.group_by_case`.
+    """
+    ids = list(case_ids)
+    if not ids:
+        return []
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("select case_id, storage_path, filename, content_type "
+                    "from attendance.case_attachments where case_id = any(%s) "
+                    "order by case_id, uploaded_at", (ids,))
+        return cur.fetchall()
+
+
 # --------------------------------------------------------------------------- upload management
 def list_uploads(conn):
     """Every ingestion run with its case counts (newest first), for the HRBP Uploads panel."""
