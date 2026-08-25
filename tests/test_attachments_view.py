@@ -1,6 +1,6 @@
 """HRBP evidence view: batch-fetch TL attachments and decide how to render each one."""
 from app import data
-from app.attachments import group_by_case, is_image
+from app.attachments import group_by_case
 
 
 class FakeCursor:
@@ -69,16 +69,57 @@ def test_group_by_case_of_nothing_is_empty():
     assert group_by_case([]) == {}
 
 
-def test_screenshots_render_as_images():
-    assert is_image("image/png") is True
-    assert is_image("image/jpeg") is True
+
+# --------------------------------------------------------------- dashboard evidence columns
+from app.attachments import EXPORT_EXPIRES_IN, evidence_columns, filter_by_crm  # noqa: E402
+
+CASES = [
+    {"id": 1, "employee_name": "Alpha", "employee_crm": "EGLP-alpha"},
+    {"id": 2, "employee_name": "Beta", "employee_crm": "EGLP-beta"},
+    {"id": 3, "employee_name": "Gamma", "employee_crm": "EGLP-gamma"},
+]
 
 
-def test_pdfs_do_not_render_as_images():
-    assert is_image("application/pdf") is False
+def test_export_links_last_seven_days():
+    assert EXPORT_EXPIRES_IN == 7 * 24 * 3600
 
 
-def test_missing_content_type_is_not_an_image():
-    # Storage rows predating a content type must degrade to a link, never crash the page.
-    assert is_image(None) is False
-    assert is_image("") is False
+def test_crm_search_is_case_insensitive_substring():
+    assert [r["id"] for r in filter_by_crm(CASES, "ALPHA")] == [1]
+    assert [r["id"] for r in filter_by_crm(CASES, "eglp")] == [1, 2, 3]
+
+
+def test_blank_crm_search_returns_everything():
+    assert filter_by_crm(CASES, "") == CASES
+    assert filter_by_crm(CASES, "   ") == CASES
+
+
+def test_crm_search_ignores_surrounding_whitespace():
+    assert [r["id"] for r in filter_by_crm(CASES, "  beta  ")] == [2]
+
+
+def test_crm_search_tolerates_a_missing_crm():
+    # A case whose employee has no CRM on file must not crash the dashboard.
+    assert filter_by_crm([{"id": 9, "employee_crm": None}], "x") == []
+
+
+def test_evidence_count_shows_without_any_signing():
+    # Counts must be free: signing 800+ rows on page load would make the dashboard unusable.
+    out = evidence_columns(CASES, {1: [ROWS[0], ROWS[1]], 2: [ROWS[2]]}, links={})
+    assert [r["evidence"] for r in out] == [2, 1, 0]
+    assert [r["screenshot"] for r in out] == [None, None, None]
+
+
+def test_prepared_links_land_next_to_their_case():
+    out = evidence_columns(CASES, {1: [ROWS[0]], 2: [ROWS[2]]},
+                           links={"c1/a.png": "https://signed/a", "c2/c.jpg": "https://signed/c"})
+    assert out[0]["screenshot"] == "https://signed/a"
+    assert out[1]["screenshot"] == "https://signed/c"
+    assert out[2]["screenshot"] is None
+
+
+def test_evidence_columns_never_mutates_the_case_rows():
+    # The dashboard reuses list_cases() output elsewhere; enriching must return new dicts.
+    original = [{"id": 1, "employee_crm": "X"}]
+    evidence_columns(original, {1: [ROWS[0]]}, links={"c1/a.png": "u"})
+    assert original == [{"id": 1, "employee_crm": "X"}]

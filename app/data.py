@@ -187,7 +187,7 @@ def reopen_tl_cases(conn, case_ids, actor, reason) -> dict:
 def list_cases(conn, status=None, team=None, manager_id=None):
     q = ("select c.id, c.work_date, c.source_status, c.status, c.manager_status, c.leave_type, "
          "       c.manager_comment, c.final_status, c.closed_by, "
-         "       e.name as employee_name, e.team, m.name as manager_name "
+         "       e.name as employee_name, e.crm as employee_crm, e.team, m.name as manager_name "
          "from attendance.cases c "
          "join attendance.employees e on e.id = c.employee_id "
          "left join attendance.managers m on m.id = c.manager_id where true ")

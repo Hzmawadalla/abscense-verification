@@ -20,10 +20,39 @@ def group_by_case(rows: list[dict]) -> dict[int, list[dict]]:
     return dict(grouped)
 
 
-def is_image(content_type: str | None) -> bool:
-    """Whether this attachment can be shown inline with st.image().
+# Signed links inside the dashboard table are short-lived (the StorageClient default). Links baked
+# into a downloaded list get a longer life so the file is still usable the next working day —
+# anyone holding that file can open the screenshots for this long without logging in.
+EXPORT_EXPIRES_IN = 7 * 24 * 3600
 
-    Screenshots (png/jpeg) render in the page; anything else — PDFs, or rows stored before a
-    content type was recorded — degrades to a download link rather than breaking the page.
+
+def filter_by_crm(rows: list[dict], query: str) -> list[dict]:
+    """Case rows whose employee CRM contains `query`, case-insensitively.
+
+    A blank query means "no filter". Rows with no CRM on file never match a non-blank query
+    rather than raising, so one incomplete record can't break the dashboard.
     """
-    return bool(content_type) and content_type.lower().startswith("image/")
+    q = (query or "").strip().lower()
+    if not q:
+        return rows
+    return [r for r in rows if q in (r.get("employee_crm") or "").lower()]
+
+
+def evidence_columns(case_rows: list[dict], by_case: dict[int, list[dict]],
+                     links: dict[str, str]) -> list[dict]:
+    """Copy of `case_rows` with two columns added: `evidence` (file count) and `screenshot` (link).
+
+    The count comes from one already-fetched query, so it is free and always shown. The link is
+    only filled for storage paths present in `links` — signing is an HTTP round-trip per file, so
+    the caller signs on demand and passes the results in. Where a case holds several files the
+    link points at the first; the count reveals that more exist.
+
+    Returns new dicts; the input rows are left untouched.
+    """
+    out = []
+    for r in case_rows:
+        files = by_case.get(r["id"], [])
+        first = files[0]["storage_path"] if files else None
+        out.append({**r, "evidence": len(files),
+                    "screenshot": links.get(first) if first else None})
+    return out

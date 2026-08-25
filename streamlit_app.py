@@ -16,7 +16,8 @@ from app import data
 from app.dingtalk import DingTalkClient
 from app.mailer import SMTPMailer
 from app.report import build_links_workbook, build_reconciled_report
-from app.attachments import group_by_case, is_image
+from app.attachments import (EXPORT_EXPIRES_IN, evidence_columns, filter_by_crm,
+                             group_by_case)
 from app.storage import StorageClient, object_path, validate_upload
 from app.verdicts import (PROOF_REQUIRED, VERDICT_LABEL, VERDICTS, blocked_cases, is_blocked,
                           unanswered, verdict_choices)
@@ -307,42 +308,49 @@ def render_hrbp():
         m[2].metric("Closed", counts.get("closed", 0))
         status_filter = st.selectbox("Show", ["manager_responded", "open", "closed", "(all)"])
         rows = data.list_cases(c, status=None if status_filter == "(all)" else status_filter)
-        st.dataframe(rows, use_container_width=True, hide_index=True)
 
-        # TL evidence for the cases currently listed. Signing a storage URL is an HTTP round-trip
-        # per file, so this stays collapsed by default and only signs what it actually renders.
-        att_rows = data.attachments_for_cases(c, [r["id"] for r in rows])
-        by_case = group_by_case(att_rows)
-        st.subheader("📎 TL evidence")
-        if not by_case:
-            st.caption("No screenshots uploaded for the cases shown.")
-        else:
-            st.caption(f"{len(att_rows)} file(s) across {len(by_case)} case(s).")
-            sc_view = storage_client()
-            if sc_view is None:
-                st.info("Storage isn't configured, so screenshots can't be displayed. Add "
-                        "SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY to Secrets.")
-            elif st.checkbox("Show screenshots inline", key="show_evidence"):
-                for r in rows:
-                    files = by_case.get(r["id"])
-                    if not files:
-                        continue
-                    verdict = VERDICT_LABEL.get(r["manager_status"], r["manager_status"] or "—")
-                    st.markdown(f"**{r['employee_name']}** · {r['work_date']} · "
-                                f"flagged *{r['source_status']}* → **{verdict}**")
-                    if r["manager_comment"]:
-                        st.caption(r["manager_comment"])
-                    for a in files:
-                        try:
-                            url = sc_view.signed_url(a["storage_path"])
-                        except Exception as e:  # noqa: BLE001 — one bad file mustn't blank the page
-                            st.caption(f"📎 {a['filename']} (link error: {e})")
-                            continue
-                        if is_image(a["content_type"]):
-                            st.image(url, caption=a["filename"], width=420)
-                        else:
-                            st.markdown(f"📎 [{a['filename']}]({url})")
-                    st.divider()
+        # Search by CRM, never by name — names collide and re-spell; the CRM is the stable key.
+        crm_q = st.text_input("Search by CRM", placeholder="e.g. EGLP-hamedem",
+                              help="Case-insensitive; matches any part of the CRM.")
+        rows = filter_by_crm(rows, crm_q)
+
+        # Evidence counts come from ONE query and are always shown. Links are not: signing is an
+        # HTTP round-trip per file, so a page with hundreds of rows only signs when asked.
+        by_case = group_by_case(data.attachments_for_cases(c, [r["id"] for r in rows]))
+        with_files = [r for r in rows if by_case.get(r["id"])]
+        sc_view = storage_client()
+
+        cols = st.columns([2, 3])
+        if sc_view is None:
+            cols[0].caption("⚠️ Storage not configured — links unavailable.")
+        elif cols[0].button(f"🔗 Prepare links ({len(with_files)} with evidence)",
+                            disabled=not with_files):
+            signed, failed = {}, 0
+            for r in with_files:
+                path = by_case[r["id"]][0]["storage_path"]
+                try:
+                    signed[path] = sc_view.signed_url(path, expires_in=EXPORT_EXPIRES_IN)
+                except Exception:  # noqa: BLE001 — one unsignable file must not lose the rest
+                    failed += 1
+            st.session_state["evidence_links"] = signed
+            if failed:
+                st.warning(f"{failed} file(s) could not be signed.")
+        links = st.session_state.get("evidence_links", {})
+        if links:
+            cols[1].caption(f"🔗 {len(links)} link(s) ready — valid 7 days. "
+                            "Use the ⬇ icon on the table to download the list.")
+
+        table = evidence_columns(rows, by_case, links)
+        st.dataframe(table, use_container_width=True, hide_index=True,
+                     column_config={
+                         "screenshot": st.column_config.LinkColumn(
+                             "Screenshot", display_text="open",
+                             help="TL's CRM-calls proof. Press 'Prepare links' to fill this in."),
+                         "evidence": st.column_config.NumberColumn(
+                             "Files", help="Screenshots attached by the TL."),
+                         "employee_crm": st.column_config.TextColumn("CRM"),
+                     })
+        st.caption("A case with more than one file links to the first — **Files** shows the total.")
 
         st.subheader("Override a finalized case (optional)")
         st.caption("TL verdicts finalize automatically — use this only to correct a specific case.")
