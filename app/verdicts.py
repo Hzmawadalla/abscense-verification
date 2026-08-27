@@ -9,6 +9,8 @@ attendance report already raised and needs no evidence.
 """
 from __future__ import annotations
 
+from uuid import UUID
+
 # Verdict dropdown (label -> stored enum code), shared by the TL page and the HRBP override.
 VERDICTS: dict[str, str] = {
     "Present": "present",
@@ -44,7 +46,7 @@ def verdict_choices() -> list[str]:
     return [SELECT_PLACEHOLDER, *VERDICTS]
 
 
-def unanswered(selections: dict[int, tuple[str | None, bool]]) -> list[int]:
+def unanswered(selections: dict[UUID, tuple[str | None, bool]]) -> list[UUID]:
     """Case ids still sitting on the placeholder. Same `selections` shape as `blocked_cases`.
 
     These are not rejections — the TL simply hasn't answered yet — so they are skipped on
@@ -63,7 +65,7 @@ def is_blocked(code: str | None, has_proof: bool) -> bool:
     return code in PROOF_REQUIRED and not has_proof
 
 
-def blocked_cases(selections: dict[int, tuple[str | None, bool]]) -> list[int]:
+def blocked_cases(selections: dict[UUID, tuple[str | None, bool]]) -> list[UUID]:
     """Case ids that must NOT be written because they assert attendance without evidence.
 
     `selections` maps case id -> (verdict code or None if unanswered, whether a usable

@@ -6,15 +6,16 @@ without booting the app (same split as `app.verdicts` / `app.security`).
 from __future__ import annotations
 
 from collections import defaultdict
+from uuid import UUID
 
 
-def group_by_case(rows: list[dict]) -> dict[int, list[dict]]:
+def group_by_case(rows: list[dict]) -> dict[UUID, list[dict]]:
     """Flat attachment rows -> {case_id: [row, ...]}, preserving the query's order.
 
     The dashboard fetches every case's attachments in one query; this turns that flat result
     into the per-case lookup the render loop needs.
     """
-    grouped: dict[int, list[dict]] = defaultdict(list)
+    grouped: dict[UUID, list[dict]] = defaultdict(list)
     for r in rows:
         grouped[r["case_id"]].append(r)
     return dict(grouped)
@@ -38,7 +39,7 @@ def filter_by_crm(rows: list[dict], query: str) -> list[dict]:
     return [r for r in rows if q in (r.get("employee_crm") or "").lower()]
 
 
-def evidence_columns(case_rows: list[dict], by_case: dict[int, list[dict]],
+def evidence_columns(case_rows: list[dict], by_case: dict[UUID, list[dict]],
                      links: dict[str, str]) -> list[dict]:
     """Copy of `case_rows` with two columns added: `evidence` (file count) and `screenshot` (link).
 

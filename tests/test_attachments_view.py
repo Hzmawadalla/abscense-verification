@@ -1,4 +1,9 @@
-"""HRBP evidence view: batch-fetch TL attachments and decide how to render each one."""
+"""HRBP evidence view: batch-fetch TL attachments and build the dashboard columns.
+
+Case ids are UUIDs in the real schema (attendance.cases.id), so the fixtures use
+UUIDs rather than ints.
+"""
+from uuid import uuid4
 from app import data
 from app.attachments import group_by_case
 
@@ -34,10 +39,12 @@ class FakeConn:
         return FakeCursor(self.rows, self.calls)
 
 
+C1, C2, C3 = uuid4(), uuid4(), uuid4()
+
 ROWS = [
-    {"case_id": 1, "storage_path": "c1/a.png", "filename": "a.png", "content_type": "image/png"},
-    {"case_id": 1, "storage_path": "c1/b.pdf", "filename": "b.pdf", "content_type": "application/pdf"},
-    {"case_id": 2, "storage_path": "c2/c.jpg", "filename": "c.jpg", "content_type": "image/jpeg"},
+    {"case_id": C1, "storage_path": "c1/a.png", "filename": "a.png", "content_type": "image/png"},
+    {"case_id": C1, "storage_path": "c1/b.pdf", "filename": "b.pdf", "content_type": "application/pdf"},
+    {"case_id": C2, "storage_path": "c2/c.jpg", "filename": "c.jpg", "content_type": "image/jpeg"},
 ]
 
 
@@ -50,19 +57,19 @@ def test_no_case_ids_skips_the_database_entirely():
 def test_every_case_is_fetched_in_a_single_query():
     # The dashboard renders many cases at once; one query per case would be an N+1.
     conn = FakeConn(ROWS)
-    got = data.attachments_for_cases(conn, [1, 2])
+    got = data.attachments_for_cases(conn, [C1, C2])
     assert len(conn.calls) == 1
     assert len(got) == 3
 
 
 def test_only_the_requested_cases_come_back():
     conn = FakeConn(ROWS)
-    got = data.attachments_for_cases(conn, [2])
+    got = data.attachments_for_cases(conn, [C2])
     assert [r["filename"] for r in got] == ["c.jpg"]
 
 
 def test_group_by_case_keeps_every_file_under_its_case():
-    assert group_by_case(ROWS) == {1: [ROWS[0], ROWS[1]], 2: [ROWS[2]]}
+    assert group_by_case(ROWS) == {C1: [ROWS[0], ROWS[1]], C2: [ROWS[2]]}
 
 
 def test_group_by_case_of_nothing_is_empty():
@@ -74,9 +81,9 @@ def test_group_by_case_of_nothing_is_empty():
 from app.attachments import EXPORT_EXPIRES_IN, evidence_columns, filter_by_crm  # noqa: E402
 
 CASES = [
-    {"id": 1, "employee_name": "Alpha", "employee_crm": "EGLP-alpha"},
-    {"id": 2, "employee_name": "Beta", "employee_crm": "EGLP-beta"},
-    {"id": 3, "employee_name": "Gamma", "employee_crm": "EGLP-gamma"},
+    {"id": C1, "employee_name": "Alpha", "employee_crm": "EGLP-alpha"},
+    {"id": C2, "employee_name": "Beta", "employee_crm": "EGLP-beta"},
+    {"id": C3, "employee_name": "Gamma", "employee_crm": "EGLP-gamma"},
 ]
 
 
@@ -85,8 +92,8 @@ def test_export_links_last_seven_days():
 
 
 def test_crm_search_is_case_insensitive_substring():
-    assert [r["id"] for r in filter_by_crm(CASES, "ALPHA")] == [1]
-    assert [r["id"] for r in filter_by_crm(CASES, "eglp")] == [1, 2, 3]
+    assert [r["id"] for r in filter_by_crm(CASES, "ALPHA")] == [C1]
+    assert [r["id"] for r in filter_by_crm(CASES, "eglp")] == [C1, C2, C3]
 
 
 def test_blank_crm_search_returns_everything():
@@ -95,23 +102,23 @@ def test_blank_crm_search_returns_everything():
 
 
 def test_crm_search_ignores_surrounding_whitespace():
-    assert [r["id"] for r in filter_by_crm(CASES, "  beta  ")] == [2]
+    assert [r["id"] for r in filter_by_crm(CASES, "  beta  ")] == [C2]
 
 
 def test_crm_search_tolerates_a_missing_crm():
     # A case whose employee has no CRM on file must not crash the dashboard.
-    assert filter_by_crm([{"id": 9, "employee_crm": None}], "x") == []
+    assert filter_by_crm([{"id": uuid4(), "employee_crm": None}], "x") == []
 
 
 def test_evidence_count_shows_without_any_signing():
     # Counts must be free: signing 800+ rows on page load would make the dashboard unusable.
-    out = evidence_columns(CASES, {1: [ROWS[0], ROWS[1]], 2: [ROWS[2]]}, links={})
+    out = evidence_columns(CASES, {C1: [ROWS[0], ROWS[1]], C2: [ROWS[2]]}, links={})
     assert [r["evidence"] for r in out] == [2, 1, 0]
     assert [r["screenshot"] for r in out] == [None, None, None]
 
 
 def test_prepared_links_land_next_to_their_case():
-    out = evidence_columns(CASES, {1: [ROWS[0]], 2: [ROWS[2]]},
+    out = evidence_columns(CASES, {C1: [ROWS[0]], C2: [ROWS[2]]},
                            links={"c1/a.png": "https://signed/a", "c2/c.jpg": "https://signed/c"})
     assert out[0]["screenshot"] == "https://signed/a"
     assert out[1]["screenshot"] == "https://signed/c"
@@ -120,6 +127,7 @@ def test_prepared_links_land_next_to_their_case():
 
 def test_evidence_columns_never_mutates_the_case_rows():
     # The dashboard reuses list_cases() output elsewhere; enriching must return new dicts.
-    original = [{"id": 1, "employee_crm": "X"}]
-    evidence_columns(original, {1: [ROWS[0]]}, links={"c1/a.png": "u"})
-    assert original == [{"id": 1, "employee_crm": "X"}]
+    cid = uuid4()
+    original = [{"id": cid, "employee_crm": "X"}]
+    evidence_columns(original, {cid: [ROWS[0]]}, links={"c1/a.png": "u"})
+    assert original == [{"id": cid, "employee_crm": "X"}]
