@@ -187,7 +187,7 @@ def reopen_tl_cases(conn, case_ids, actor, reason) -> dict:
 def list_cases(conn, status=None, team=None, manager_id=None):
     q = ("select c.id, c.work_date, c.source_status, c.status, c.manager_status, c.leave_type, "
          "       c.manager_comment, c.final_status, c.closed_by, "
-         "       e.name as employee_name, e.team, m.name as manager_name "
+         "       e.name as employee_name, e.crm as employee_crm, e.team, m.name as manager_name "
          "from attendance.cases c "
          "join attendance.employees e on e.id = c.employee_id "
          "left join attendance.managers m on m.id = c.manager_id where true ")
@@ -339,6 +339,22 @@ def list_attachments(conn, case_id):
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute("select storage_path, filename, content_type from attendance.case_attachments "
                     "where case_id = %s order by uploaded_at", (case_id,))
+        return cur.fetchall()
+
+
+def attachments_for_cases(conn, case_ids):
+    """Every attachment for the given cases, in one query.
+
+    The HRBP evidence view renders many cases at once; fetching per case would be an N+1.
+    Returns flat rows carrying case_id — see `app.attachments.group_by_case`.
+    """
+    ids = list(case_ids)
+    if not ids:
+        return []
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("select case_id, storage_path, filename, content_type "
+                    "from attendance.case_attachments where case_id = any(%s) "
+                    "order by case_id, uploaded_at", (ids,))
         return cur.fetchall()
 
 
