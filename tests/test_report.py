@@ -52,12 +52,13 @@ def test_changes_sheet_records_before_and_after(tmp_path):
     data = build_reconciled_report(_make_matrix(tmp_path), _closed(), LABELS, year=2026)
     rows = list(openpyxl.load_workbook(io.BytesIO(data))["Changes"].iter_rows(values_only=True))
     assert rows[0] == ("CRM", "Employee", "Date", "Before", "After", "TL", "Closed by", "Comment",
-                       "In workbook?")
+                       "In workbook?", "Overwritten?")
     assert rows[1][0] == "51AHMED"
     assert rows[1][2] == "2026-06-15"
     assert rows[1][3] == "Absent"          # before
     assert rows[1][4] == "Annual Leave"    # after
     assert rows[1][8] == "Yes"             # present in this workbook
+    assert rows[1][9] == "Yes"             # cell was Absent, so it was overwritten
 
 
 def test_case_not_in_workbook_is_flagged_no_and_not_written(tmp_path):
@@ -82,6 +83,55 @@ def test_case_not_in_workbook_is_flagged_no_and_not_written(tmp_path):
     changes = list(wb["Changes"].iter_rows(values_only=True))
     assert changes[1][0] == "EGLP-esraamahmoud"
     assert changes[1][8] == "No"
+    assert changes[1][9] == "No — not in workbook"
+
+
+def _case(crm, day, final_status="present"):
+    return {
+        "employee_crm": crm,
+        "employee_name": crm,
+        "manager_name": "Zimmy",
+        "work_date": datetime.date(2026, 6, day),
+        "source_status": "Absent",
+        "final_status": final_status,
+        "closed_by": "hrbp",
+        "manager_comment": "",
+    }
+
+
+def _matrix_with(tmp_path, cells):
+    """One employee per cell value, all on 15-Jun (column 2)."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Summary Report"
+    ws.append(["CRM", "15-Jun"])
+    for i, value in enumerate(cells):
+        ws.append([f"51emp{i}", value])
+    p = tmp_path / "matrix.xlsx"
+    wb.save(p)
+    return str(p)
+
+
+def test_overwrites_absent_and_no_show_variants(tmp_path):
+    cells = ["Absent", "absent (HD)", "Absent - To be confirmed", "No Show"]
+    cases = [_case(f"51emp{i}", 15) for i in range(len(cells))]
+    data = build_reconciled_report(_matrix_with(tmp_path, cells), cases, LABELS, year=2026)
+    wb = openpyxl.load_workbook(io.BytesIO(data))
+    ws = wb["Summary Report"]
+    assert [ws.cell(row=r, column=2).value for r in range(2, 2 + len(cells))] == ["Present"] * 4
+    assert [row[9] for row in list(wb["Changes"].iter_rows(values_only=True))[1:]] == ["Yes"] * 4
+
+
+def test_non_absent_cell_is_skipped_not_overwritten(tmp_path):
+    cells = ["Annual Leave (Failed)", "Leave Approval Pending", "Normal", None]
+    cases = [_case(f"51emp{i}", 15) for i in range(len(cells))]
+    data = build_reconciled_report(_matrix_with(tmp_path, cells), cases, LABELS, year=2026)
+    wb = openpyxl.load_workbook(io.BytesIO(data))
+    ws = wb["Summary Report"]
+    assert [ws.cell(row=r, column=2).value for r in range(2, 2 + len(cells))] == cells
+    changes = list(wb["Changes"].iter_rows(values_only=True))[1:]
+    assert [row[8] for row in changes] == ["Yes"] * 4          # all present in this workbook
+    assert [row[9] for row in changes] == ["No — cell is not Absent"] * 4
 
 
 def test_links_workbook_has_header_and_rows():

@@ -4,8 +4,10 @@ Given the original attendance workbook (the wide Summary Report matrix) and the 
 verification cases, produce a two-sheet .xlsx returned as bytes:
 
   * "<matrix sheet>" — the original matrix with each closed case's cell overwritten by its final
-    verdict label, matched by CRM x date.
-  * "Changes" — one row per closed case: CRM, Employee, Date, Before, After, TL, Closed by, Comment.
+    verdict label, matched by CRM x date. Only a cell that still reads Absent / No Show is
+    overwritten; any other value (a leave, "Normal", a failed/pending leave) is left untouched.
+  * "Changes" — one row per closed case: CRM, Employee, Date, Before, After, TL, Closed by, Comment,
+    In workbook?, Overwritten?.
 
 Matching mirrors ingestion exactly (case-insensitive CRM key, same date-header parsing), so a cell
 verified during ingestion maps back to the same cell here.
@@ -15,13 +17,28 @@ import io
 import openpyxl
 
 from ingestion.reference import _clean, _key
+from ingestion.status_rules import TRIGGER_EXACT, _base, normalize
 from ingestion.summary import parse_day_header
 from ingestion.workbook import norm_header, resolve_sheet
 
 CHANGES_SHEET = "Changes"
 MATRIX_SHEET_HINT = "Summary Report"
 CHANGES_HEADER = ["CRM", "Employee", "Date", "Before", "After", "TL", "Closed by", "Comment",
-                  "In workbook?"]
+                  "In workbook?", "Overwritten?"]
+OVERWRITTEN = "Yes"
+SKIPPED_NOT_ABSENT = "No — cell is not Absent"
+SKIPPED_NOT_IN_WORKBOOK = "No — not in workbook"
+
+
+def is_overwritable(cell_value) -> bool:
+    """Whether a matrix cell may take a manager's verdict: its base status is Absent or No Show.
+
+    Suffixes such as "(HD)" or " - To be confirmed" are ignored, using the same base-status rule
+    as ingestion. Anything else — a leave, "Normal", a failed/pending leave — keeps HR's value.
+    """
+    if cell_value is None:
+        return False
+    return _base(normalize(cell_value)) in TRIGGER_EXACT
 LINKS_HEADER = ["TL name", "CRM", "Email", "Open cases", "Link"]
 
 
@@ -76,8 +93,13 @@ def build_reconciled_report(matrix_path, closed_cases, labels, year,
         code = cs.get("final_status")
         label = labels.get(code, code)
         in_workbook = row is not None and col is not None
-        if in_workbook:  # only overwrite a cell that actually exists in this file
+        if not in_workbook:
+            outcome = SKIPPED_NOT_IN_WORKBOOK
+        elif is_overwritable(ws.cell(row=row, column=col).value):
             ws.cell(row=row, column=col).value = label
+            outcome = OVERWRITTEN
+        else:
+            outcome = SKIPPED_NOT_ABSENT
         ch.append([
             cs.get("employee_crm"),
             cs.get("employee_name"),
@@ -88,6 +110,7 @@ def build_reconciled_report(matrix_path, closed_cases, labels, year,
             cs.get("closed_by"),
             cs.get("manager_comment"),
             "Yes" if in_workbook else "No",
+            outcome,
         ])
 
     if staff_gaps:  # HC/Structure completeness gaps — staff not producing verifiable cases
