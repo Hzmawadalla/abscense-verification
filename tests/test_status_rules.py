@@ -15,6 +15,8 @@ from ingestion.status_rules import classify
     ("Annual Leave (Failed)", "skip"),
     ("Annual Leave (Pending)", "skip"),
     ("Sick Leave (Returned)", "skip"),
+    ("Marriage Leave (Pending)", "skip"),   # company-granted leave, same HR workflow as annual
+    ("Marriage Leave", "skip"),
     # same annotation on a non-leave base still triggers (e.g. a bare approval-pending status)
     ("Leave Approval Pending", "trigger"),
     # clean approved states -> skip

@@ -19,8 +19,8 @@ from app.report import build_links_workbook, build_reconciled_report
 from app.attachments import (EXPORT_EXPIRES_IN, evidence_columns, filter_by_crm,
                              group_by_case)
 from app.storage import StorageClient, object_path, validate_upload
-from app.verdicts import (PROOF_REQUIRED, VERDICT_LABEL, VERDICTS, blocked_cases, is_blocked,
-                          unanswered, verdict_choices)
+from app.verdicts import (HRBP_OVERRIDE_VERDICTS, PROOF_REQUIRED, VERDICT_LABEL, VERDICTS,
+                          blocked_cases, is_blocked, unanswered, verdict_choices)
 from app.version import build_stamp
 from ingestion import loader
 from ingestion.config import load_aliases, load_dingtalk_ids
@@ -371,13 +371,14 @@ def render_hrbp():
                         st.caption(f"📎 {a['filename']} (link error: {e})")
                 else:
                     st.caption(f"📎 {a['filename']} (storage not configured)")
-            ov = st.selectbox("Override to", list(VERDICTS.keys()), key="ov")
+            ov = st.selectbox("Override to", list(HRBP_OVERRIDE_VERDICTS.keys()), key="ov")
             ovc = st.text_input("Reason (required for override)", key="ovc")
             if st.button("Override"):
                 if not ovc.strip():
                     st.error("Override requires a reason.")
                 else:
-                    data.close_case(c, r["id"], actor, final_status=VERDICTS[ov], comment=ovc)
+                    data.close_case(c, r["id"], actor, final_status=HRBP_OVERRIDE_VERDICTS[ov],
+                                    comment=ovc)
                     st.success("Case overridden.")
                     st.rerun()
         else:

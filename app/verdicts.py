@@ -24,12 +24,25 @@ VERDICTS: dict[str, str] = {
 VERDICT_LABEL: dict[str, str] = {
     "present": "Present",
     "absent": "Absent",
-    # retired — never assignable again, still readable on historical rows
+    # leave codes — no longer assignable by a TL, only by an HRBP override (HRBP_OVERRIDE_VERDICTS);
+    # also readable on historical rows closed before the binary change
     "annual_leave": "Annual Leave",
     "unpaid_leave": "Unpaid Leave",
     "sick_leave": "Sick Leave",
-    "half_day": "Half Day",
+    "half_day": "Half Day",  # retired — never assignable again
     "leave": "On Leave",
+}
+
+# HRBP override dropdown (label -> code). A TL can only say Present or Absent, so a day that was
+# really a leave (e.g. marriage leave noted only in the TL comment) ends up Absent; HRBP needs the
+# leave codes to correct it. Reuses enum values that already exist — no migration. TL-only rules
+# (the CRM-proof gate) do not apply: HRBP is the authority and must give a reason instead.
+HRBP_OVERRIDE_VERDICTS: dict[str, str] = {
+    **VERDICTS,
+    "Annual Leave": "annual_leave",
+    "Sick Leave": "sick_leave",
+    "Unpaid Leave": "unpaid_leave",
+    "Other Leave (marriage, bereavement…)": "leave",
 }
 
 # Verdict codes that a TL must evidence with a CRM-calls screenshot.

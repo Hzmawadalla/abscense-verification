@@ -5,12 +5,28 @@ must be backed by a screenshot of that employee's CRM calls for the day; Absent 
 original flag and needs nothing. Cases that fail the gate are never written, so they stay
 open and the TL can resubmit on the same link.
 """
-from app.verdicts import (SELECT_PLACEHOLDER, VERDICT_LABEL, VERDICTS, blocked_cases,
-                          is_blocked, unanswered, verdict_choices)
+from app.verdicts import (HRBP_OVERRIDE_VERDICTS, SELECT_PLACEHOLDER, VERDICT_LABEL, VERDICTS,
+                          blocked_cases, is_blocked, unanswered, verdict_choices)
 
 
 def test_tl_can_only_choose_present_or_absent():
     assert VERDICTS == {"Present": "present", "Absent": "absent"}
+
+
+def test_hrbp_override_adds_leave_codes_after_present_and_absent():
+    # HRBP corrects cases where the TL could only say Absent but the day was a real leave.
+    assert HRBP_OVERRIDE_VERDICTS == {
+        "Present": "present",
+        "Absent": "absent",
+        "Annual Leave": "annual_leave",
+        "Sick Leave": "sick_leave",
+        "Unpaid Leave": "unpaid_leave",
+        "Other Leave (marriage, bereavement…)": "leave",
+    }
+
+
+def test_hrbp_override_codes_all_render_with_a_label():
+    assert all(code in VERDICT_LABEL for code in HRBP_OVERRIDE_VERDICTS.values())
 
 
 def test_labels_still_resolve_retired_leave_codes():
