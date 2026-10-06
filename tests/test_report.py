@@ -4,7 +4,7 @@ import io
 
 import openpyxl
 
-from app.report import build_links_workbook, build_reconciled_report
+from app.report import build_links_workbook, build_reconciled_report, reconcile
 
 LABELS = {"absent": "Absent", "annual_leave": "Annual Leave", "present": "Present"}
 
@@ -62,12 +62,12 @@ def test_changes_sheet_records_before_and_after(tmp_path):
 
 
 def test_case_not_in_workbook_is_flagged_no_and_not_written(tmp_path):
-    # A closed case for an employee/date absent from the uploaded file (like her 9-Jun case).
+    # A closed case inside this file's period for an employee who is not in the uploaded file.
     out_of_file = [{
         "employee_crm": "EGLP-esraamahmoud",
         "employee_name": "Esraa",
         "manager_name": "Zimmy",
-        "work_date": datetime.date(2026, 6, 9),   # not a column in the test matrix
+        "work_date": datetime.date(2026, 6, 16),  # in the period, but she has no row
         "source_status": "Bereavement Leave",
         "final_status": "present",
         "closed_by": "hrbp",
@@ -161,6 +161,66 @@ def test_missing_crm_column_raises(tmp_path):
     wb.save(p)
     try:
         build_reconciled_report(str(p), _closed(), LABELS, year=2026)
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
+# --- reconcile(): period scoping, counts and file-like input -------------------------------------
+
+def test_cases_outside_the_workbook_period_are_left_out(tmp_path):
+    # Closed cases accumulate across months; a June file must not list May or July cases.
+    cases = [_case("51ahmed", 15), {**_case("51ahmed", 1), "work_date": datetime.date(2026, 5, 20)},
+             {**_case("51sara", 1), "work_date": datetime.date(2026, 7, 2)}]
+    result = reconcile(_make_matrix(tmp_path), cases, LABELS, year=2026)
+    changes = list(openpyxl.load_workbook(io.BytesIO(result.xlsx))["Changes"].iter_rows(values_only=True))
+    assert [row[2] for row in changes[1:]] == ["2026-06-15"]
+    assert result.other_period == 2
+
+
+def test_counts_each_outcome(tmp_path):
+    cases = [
+        _case("51ahmed", 15),            # Absent cell -> overwritten
+        _case("51ahmed", 16),            # Normal cell -> skipped
+        _case("51nobody", 15),           # in period, no row -> not in workbook
+    ]
+    result = reconcile(_make_matrix(tmp_path), cases, LABELS, year=2026)
+    assert (result.overwritten, result.skipped_not_absent, result.not_in_workbook,
+            result.other_period) == (1, 1, 1, 0)
+
+
+def test_period_is_the_month_when_dates_share_one(tmp_path):
+    assert reconcile(_make_matrix(tmp_path), [], LABELS, year=2026).period == "2026-06"
+
+
+def test_period_is_a_range_when_dates_span_months(tmp_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Summary Report"
+    ws.append(["CRM", "26-Jun", "25-Jul"])
+    ws.append(["51ahmed", "Absent", "Normal"])
+    p = tmp_path / "cycle.xlsx"
+    wb.save(p)
+    assert reconcile(str(p), [], LABELS, year=2026).period == "2026-06-26_to_2026-07-25"
+
+
+def test_accepts_an_in_memory_upload(tmp_path):
+    raw = io.BytesIO(open(_make_matrix(tmp_path), "rb").read())   # what Streamlit hands us
+    result = reconcile(raw, _closed(), LABELS, year=2026)
+    ws = openpyxl.load_workbook(io.BytesIO(result.xlsx))["Summary Report"]
+    assert ws.cell(row=2, column=3).value == "Annual Leave"
+
+
+def test_no_date_columns_raises(tmp_path):
+    # A wrong Year or an unexpected header format would otherwise silently match nothing.
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Summary Report"
+    ws.append(["CRM", "Normal Days"])
+    p = tmp_path / "nodates.xlsx"
+    wb.save(p)
+    try:
+        reconcile(str(p), _closed(), LABELS, year=2026)
         assert False, "expected ValueError"
     except ValueError:
         pass
