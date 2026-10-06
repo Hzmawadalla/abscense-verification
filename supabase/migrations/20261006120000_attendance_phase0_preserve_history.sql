@@ -12,21 +12,27 @@
 -- foreign-key error instead of silently deleting history.
 --
 -- SAFETY: the foreign keys are replaced only after a guard has verified the current schema —
--- exactly one FK on each case_id column, with the expected name and the expected old delete rule
--- (case_attachments: CASCADE, audit_log: SET NULL). Anything else aborts the whole migration with
--- an exception, so a renamed or duplicated constraint can never be skipped silently and leave the
--- old CASCADE in place. A second guard after the change verifies exactly one RESTRICT FK on each
--- column. Re-running the migration once applied therefore also aborts (rules are already RESTRICT).
+-- exactly one FK on each case_id column, with the expected name, the expected old delete rule
+-- (case_attachments: CASCADE, audit_log: SET NULL), single-column on case_id, and referencing
+-- exactly attendance.cases(id). Anything else aborts the whole migration with an exception, so a
+-- renamed, duplicated, composite or mis-targeted constraint can never be skipped silently and
+-- leave the old CASCADE in place. A second guard after the change verifies exactly one RESTRICT,
+-- single-column FK to attendance.cases(id) on each column. Re-running the migration once applied
+-- therefore also aborts (rules are already RESTRICT).
 --
 -- REQUIRED PREFLIGHT before applying to production (read-only; expected output below):
---   select con.conrelid::regclass as tbl, con.conname, con.confdeltype
+--   select con.conrelid::regclass as tbl, con.conname, con.confdeltype,
+--          con.confrelid::regclass as ref_tbl, array_length(con.conkey, 1) as n_cols,
+--          (select string_agg(a.attname, ',') from pg_attribute a
+--            where a.attrelid = con.confrelid and a.attnum = any(con.confkey)) as ref_cols
 --   from pg_constraint con
 --   join pg_attribute att on att.attrelid = con.conrelid and att.attnum = any(con.conkey)
 --   where con.contype = 'f' and att.attname = 'case_id'
 --     and con.conrelid in ('attendance.case_attachments'::regclass, 'attendance.audit_log'::regclass);
 -- Expected exactly two rows:
---   attendance.case_attachments | case_attachments_case_id_fkey | c   (c = cascade)
---   attendance.audit_log        | audit_log_case_id_fkey        | n   (n = set null)
+--   attendance.case_attachments | case_attachments_case_id_fkey | c | attendance.cases | 1 | id
+--   attendance.audit_log        | audit_log_case_id_fkey        | n | attendance.cases | 1 | id
+--   (confdeltype: c = cascade, n = set null)
 begin;
 
 set search_path = attendance, public;
@@ -35,23 +41,31 @@ set search_path = attendance, public;
 do $$
 declare
   spec record;
+  cases_id int2 := (select attnum from pg_attribute
+                     where attrelid = 'attendance.cases'::regclass and attname = 'id');
   n int;
   nm text;
   rule text;
+  ref_ok boolean;
+  single boolean;
 begin
   for spec in select * from (values
       ('case_attachments', 'case_attachments_case_id_fkey', 'c'),
       ('audit_log',        'audit_log_case_id_fkey',        'n')) as s(tbl, expected_name, expected_rule)
   loop
-    select count(*), min(con.conname::text), min(con.confdeltype::text)
-      into n, nm, rule
+    select count(*), min(con.conname::text), min(con.confdeltype::text),
+           bool_and(con.confrelid = 'attendance.cases'::regclass
+                    and con.confkey = array[cases_id]),
+           bool_and(array_length(con.conkey, 1) = 1)
+      into n, nm, rule, ref_ok, single
       from pg_constraint con
       join pg_attribute att on att.attrelid = con.conrelid and att.attnum = any(con.conkey)
      where con.conrelid = format('attendance.%I', spec.tbl)::regclass
        and con.contype = 'f' and att.attname = 'case_id';
-    if n <> 1 or nm is distinct from spec.expected_name or rule is distinct from spec.expected_rule then
-      raise exception 'Phase 0 precondition failed on attendance.%: expected exactly 1 FK on case_id named % with confdeltype %, found % FK(s) (name %, confdeltype %). Nothing was changed.',
-        spec.tbl, spec.expected_name, spec.expected_rule, n, nm, rule;
+    if n <> 1 or nm is distinct from spec.expected_name or rule is distinct from spec.expected_rule
+       or ref_ok is not true or single is not true then
+      raise exception 'Phase 0 precondition failed on attendance.%: expected exactly 1 single-column FK on case_id named % with confdeltype % referencing attendance.cases(id); found % FK(s) (name %, confdeltype %, references cases(id) %, single-column %). Nothing was changed.',
+        spec.tbl, spec.expected_name, spec.expected_rule, n, nm, rule, ref_ok, single;
     end if;
   end loop;
 end $$;
@@ -76,23 +90,31 @@ alter table attendance.cases
   add column if not exists hrbp_override_by   text,
   add column if not exists hrbp_override_at   timestamptz;
 
--- Post-check: exactly one FK per case_id column, and it is RESTRICT (no CASCADE left behind).
+-- Post-check: exactly one FK per case_id column — RESTRICT, single-column, to attendance.cases(id)
+-- (no CASCADE left behind).
 do $$
 declare
   t text;
+  cases_id int2 := (select attnum from pg_attribute
+                     where attrelid = 'attendance.cases'::regclass and attname = 'id');
   n int;
   rule text;
+  ref_ok boolean;
+  single boolean;
 begin
   foreach t in array array['case_attachments', 'audit_log'] loop
-    select count(*), min(con.confdeltype::text)
-      into n, rule
+    select count(*), min(con.confdeltype::text),
+           bool_and(con.confrelid = 'attendance.cases'::regclass
+                    and con.confkey = array[cases_id]),
+           bool_and(array_length(con.conkey, 1) = 1)
+      into n, rule, ref_ok, single
       from pg_constraint con
       join pg_attribute att on att.attrelid = con.conrelid and att.attnum = any(con.conkey)
      where con.conrelid = format('attendance.%I', t)::regclass
        and con.contype = 'f' and att.attname = 'case_id';
-    if n <> 1 or rule is distinct from 'r' then
-      raise exception 'Phase 0 post-check failed on attendance.%: expected exactly 1 RESTRICT FK on case_id, found % FK(s) (confdeltype %)',
-        t, n, rule;
+    if n <> 1 or rule is distinct from 'r' or ref_ok is not true or single is not true then
+      raise exception 'Phase 0 post-check failed on attendance.%: expected exactly 1 single-column RESTRICT FK on case_id referencing attendance.cases(id); found % FK(s) (confdeltype %, references cases(id) %, single-column %)',
+        t, n, rule, ref_ok, single;
     end if;
   end loop;
 end $$;

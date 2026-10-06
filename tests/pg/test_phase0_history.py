@@ -329,3 +329,53 @@ def test_after_migration_exactly_one_restrict_fk_per_column(conn):
         assert cur.fetchall() == [("attendance.audit_log", 1, "r"),
                                   ("attendance.case_attachments", 1, "r")]
     conn.rollback()
+
+
+def _swap_attachments_fk(cur, definition):
+    """Replace case_attachments' FK with a correctly NAMED, CASCADE one defined by `definition`."""
+    cur.execute("alter table attendance.case_attachments "
+                "drop constraint case_attachments_case_id_fkey")
+    cur.execute("alter table attendance.case_attachments add constraint "
+                f"case_attachments_case_id_fkey {definition} on delete cascade")
+
+
+def _assert_refused_and_unchanged(conn, cur, forward):
+    cur.execute("savepoint before_migration")
+    with pytest.raises(RaiseException, match="precondition failed on attendance.case_attachments"):
+        cur.execute(forward)
+    cur.execute("rollback to savepoint before_migration")
+    assert not _has_column(conn, "case_attachments", "voided_at")      # nothing applied
+    assert _fk_rules(conn)["case_attachments_case_id_fkey"] == "c"     # old rule still there
+
+
+def test_migration_refuses_fk_to_the_wrong_table(conn):
+    rollback, forward = _rollback_body()
+    with conn.cursor() as cur:
+        cur.execute(rollback)
+        cur.execute("create table attendance.cases_shadow (id uuid primary key)")
+        _swap_attachments_fk(cur, "foreign key (case_id) references attendance.cases_shadow(id)")
+        _assert_refused_and_unchanged(conn, cur, forward)
+    conn.rollback()
+
+
+def test_migration_refuses_fk_to_the_wrong_column(conn):
+    rollback, forward = _rollback_body()
+    with conn.cursor() as cur:
+        cur.execute(rollback)
+        cur.execute("alter table attendance.cases add column alt_id uuid unique")
+        _swap_attachments_fk(cur, "foreign key (case_id) references attendance.cases(alt_id)")
+        _assert_refused_and_unchanged(conn, cur, forward)
+    conn.rollback()
+
+
+def test_migration_refuses_a_composite_fk(conn):
+    rollback, forward = _rollback_body()
+    with conn.cursor() as cur:
+        cur.execute(rollback)
+        cur.execute("alter table attendance.cases add constraint cases_id_work_date_uniq "
+                    "unique (id, work_date)")
+        cur.execute("alter table attendance.case_attachments add column work_date date")
+        _swap_attachments_fk(cur, "foreign key (case_id, work_date) "
+                                  "references attendance.cases(id, work_date)")
+        _assert_refused_and_unchanged(conn, cur, forward)
+    conn.rollback()
