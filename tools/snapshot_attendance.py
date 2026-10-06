@@ -1,7 +1,8 @@
 """Pre-migration SAFETY SNAPSHOT of the `attendance` schema — read-only. NOT a database backup.
 
-Copies every table in the `attendance` schema to CSV (credential columns excluded), plus a listing (names and sizes, not the
-files) of the evidence bucket, into a timestamped folder OUTSIDE the repo. It exists so a
+Copies every table in the `attendance` schema to CSV (credential columns excluded), plus a
+listing (names and sizes, not the files) of the evidence bucket, into a timestamped folder
+OUTSIDE the repo, created owner-only. It exists so a
 reviewer can compare row counts and spot-check values before and after a migration.
 
 It is not a recovery mechanism: it captures no schema, types, constraints, sequences or storage
