@@ -111,13 +111,18 @@ link, and lets **HRBP** close or override before results merge back into payroll
 
 ## Reference
 
-### Verdicts (TL & HRBP)
-`Present` · `Absent`
-> **Present** must be backed by a CRM-calls screenshot; the app refuses to save it otherwise.
+### Verdicts
+**TL:** `Present` · `Absent`
+**HRBP override:** `Present` · `Absent` · `Annual Leave` · `Sick Leave` · `Unpaid Leave` ·
+`Other Leave (marriage, bereavement…)`
+> **Present** from a TL must be backed by a CRM-calls screenshot; the app refuses to save it otherwise.
 >
-> The retired codes `annual_leave` · `unpaid_leave` · `sick_leave` · `half_day` · `leave` can no
-> longer be assigned, but remain in the Postgres enum (Postgres cannot cleanly drop an enum value)
-> and still render with their old labels on cases closed before the change.
+> A TL can't record a leave, so a real leave day (often explained only in the TL comment) closes as
+> **Absent**. Correct it with an HRBP override to the matching leave; the reason is required and
+> audit-logged.
+>
+> `half_day` is retired: it can't be assigned but still renders on old cases. Leave types marked
+> Pending/Failed/Returned (incl. **Marriage Leave**) are skipped at ingest and never become cases.
 > Half-day / sick-leave flow into the export as labels — the actual pay math is a manual
 > downstream step.
 

@@ -15,7 +15,7 @@ SKIP_CLEAN = {
 }
 SKIP_LEAVES = {
     "annual leave", "sick leave", "casual leave", "continuing education leave",
-    "paternity leave", "bereavement leave", "unpaid leave",
+    "paternity leave", "bereavement leave", "unpaid leave", "marriage leave",
 }
 NOT_VERIFIED = {"late", "missing punch out", "half day", "halfday", "hlaf day", "2 hour excuse", "excuse"}
 TRIGGER_EXACT = {"absent", "no show"}
