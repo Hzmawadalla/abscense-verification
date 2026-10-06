@@ -47,8 +47,10 @@ link, and lets **HRBP** close or override before results merge back into payroll
 
 8. **Export for payroll** (📤 Export tab)
    - Re-upload the period's attendance workbook → **Build reconciled report**.
-   - Sheet 1 = matrix with closed cases overwritten by their final verdict.
-   - Sheet 2 = "Changes" log (CRM · date · before → after · **In workbook?**).
+   - Sheet 1 = matrix with closed cases overwritten by their final verdict — **only where the cell
+     still reads Absent / No Show** (incl. `(HD)` / `- To be confirmed` variants). Any other value
+     (a leave, Normal, a failed/pending leave) is kept as HR entered it.
+   - Sheet 2 = "Changes" log (CRM · date · before → after · **In workbook?** · **Overwritten?**).
 
 ---
 
