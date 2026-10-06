@@ -113,5 +113,9 @@ def test_source_change_audit_only_fires_on_a_real_change():
     assert "'source_status_changed'" in sql
     assert "is distinct from %(source_status)s::text" in sql
     assert "is distinct from %(is_half_day)s::boolean" in sql
-    for key in ("employee_crm", "work_date", "source_status", "is_half_day", "ingestion_run_id"):
+    for key in ("employee_crm", "work_date", "source_status", "is_half_day"):
         assert sql.count(f"'{key}'") == 2              # in both the old and the new snapshot
+    # old = the run that set the replaced value (latest change's new run, else the owning run);
+    # new = this upload. The chain itself is proven against Postgres in tests/pg/.
+    assert "coalesce( (select (l.new_value->>'ingestion_run_id')::uuid" in sql
+    assert "'ingestion_run_id', %(run_id)s::uuid" in sql

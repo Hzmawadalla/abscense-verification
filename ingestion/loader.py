@@ -59,14 +59,22 @@ on conflict (employee_id, work_date) do update set
 # Runs BEFORE UPSERT_CASE, once per case candidate: when the case already exists and the new
 # upload brings a different source status (or half-day flag), record the old and new values in
 # the audit log. The upsert below then overwrites source_status as before; without this entry the
-# value it replaces would be gone. The case keeps its owning run (creator-owns), so the "old"
-# ingestion_run_id is that run and the "new" one is the upload being loaded.
+# value it replaces would be gone. The "old" ingestion_run_id is the upload that SET the value
+# being replaced: the new run of this case's latest source_status_changed entry, or — on the first
+# change — the case's owning run (cases.ingestion_run_id is creator-owned and never reassigned).
+# So run1 -> run2 -> run3 audits as run1->run2, then run2->run3. The "new" one is this upload.
 AUDIT_SOURCE_CHANGE = """
 insert into attendance.audit_log (case_id, actor, action, old_value, new_value)
 select c.id, %(actor)s, 'source_status_changed',
   jsonb_build_object('employee_crm', e.crm, 'work_date', c.work_date,
                      'source_status', c.source_status, 'is_half_day', c.is_half_day,
-                     'ingestion_run_id', c.ingestion_run_id),
+                     'ingestion_run_id', coalesce(
+                       (select (l.new_value->>'ingestion_run_id')::uuid
+                          from attendance.audit_log l
+                         where l.case_id = c.id and l.action = 'source_status_changed'
+                         order by l.created_at desc
+                         limit 1),
+                       c.ingestion_run_id)),
   jsonb_build_object('employee_crm', e.crm, 'work_date', c.work_date,
                      'source_status', %(source_status)s::text, 'is_half_day', %(is_half_day)s::boolean,
                      'ingestion_run_id', %(run_id)s::uuid)

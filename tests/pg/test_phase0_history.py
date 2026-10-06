@@ -4,7 +4,7 @@ import datetime
 from pathlib import Path
 
 import pytest
-from psycopg.errors import ForeignKeyViolation
+from psycopg.errors import ForeignKeyViolation, RaiseException
 from psycopg.rows import dict_row
 
 from app import data
@@ -170,6 +170,29 @@ def test_reupload_change_is_audited_with_old_and_new_values(conn, seed):
     assert case["ingestion_run_id"] == run1           # creator-owns, as before
 
 
+def test_three_uploads_chain_previous_upload_correctly(conn, seed):
+    run1 = _load(conn, "Absent", "week1.xlsx")
+    run2 = _load(conn, "No Show", "week2.xlsx")
+    run3 = _load(conn, "Absent", "week3.xlsx")
+    chain = [(a["old_value"]["ingestion_run_id"], a["new_value"]["ingestion_run_id"],
+              a["old_value"]["source_status"], a["new_value"]["source_status"])
+             for a in _source_audits(conn)]
+    assert chain == [(str(run1), str(run2), "Absent", "No Show"),
+                     (str(run2), str(run3), "No Show", "Absent")]   # run2 -> run3, not run1
+    case = _q(conn, "select ingestion_run_id from attendance.cases")[0]
+    assert case["ingestion_run_id"] == run1           # owning run still never reassigned
+
+
+def test_unchanged_upload_between_changes_does_not_break_the_chain(conn, seed):
+    run1 = _load(conn, "Absent", "week1.xlsx")
+    run2 = _load(conn, "No Show", "week2.xlsx")
+    _load(conn, "No Show", "week3.xlsx")              # same value: no audit, no new link
+    run4 = _load(conn, "Absent", "week4.xlsx")
+    chain = [(a["old_value"]["ingestion_run_id"], a["new_value"]["ingestion_run_id"])
+             for a in _source_audits(conn)]
+    assert chain == [(str(run1), str(run2)), (str(run2), str(run4))]
+
+
 def test_identical_reupload_writes_no_audit(conn, seed):
     _load(conn, "Absent", "week1.xlsx")
     _load(conn, "Absent", "week1-again.xlsx")
@@ -223,13 +246,15 @@ def _has_column(conn, table, column):
         return cur.fetchone() is not None
 
 
-def test_rollback_sql_restores_previous_schema_and_migration_reapplies(conn):
+def _rollback_body():
     text = MIGRATION.read_text(encoding="utf-8").splitlines()
     marker = next(i for i, ln in enumerate(text) if ln.startswith("-- ROLLBACK"))
-    forward = _body(text[:marker])
     tail = [ln[3:] if ln.startswith("-- ") else "" for ln in text[marker:]]
-    start, end = tail.index("begin;"), tail.index("commit;")
-    rollback = "\n".join(tail[start + 1:end])   # exactly the commented undo block
+    return "\n".join(tail[tail.index("begin;") + 1:tail.index("commit;")]), _body(text[:marker])
+
+
+def test_rollback_sql_restores_previous_schema_and_migration_reapplies(conn):
+    rollback, forward = _rollback_body()            # exactly the commented undo block
     with conn.cursor() as cur:
         cur.execute(rollback)
         assert _fk_rules(conn) == {"case_attachments_case_id_fkey": "c",
@@ -241,3 +266,66 @@ def test_rollback_sql_restores_previous_schema_and_migration_reapplies(conn):
                                    "audit_log_case_id_fkey": "r"}
         assert _has_column(conn, "cases", "hrbp_override_at")
     conn.rollback()                              # DDL is transactional: leave the cluster as-is
+
+
+def test_migration_refuses_a_renamed_fk_and_changes_nothing(conn):
+    rollback, forward = _rollback_body()
+    with conn.cursor() as cur:
+        cur.execute(rollback)                                  # back to the pre-Phase-0 schema
+        cur.execute("alter table attendance.case_attachments "
+                    "rename constraint case_attachments_case_id_fkey to legacy_attachments_fk")
+        cur.execute("savepoint before_migration")
+        with pytest.raises(RaiseException, match="precondition failed on attendance.case_attachments"):
+            cur.execute(forward)
+        cur.execute("rollback to savepoint before_migration")
+        # the old CASCADE rule is still the only FK — nothing half-applied
+        cur.execute("select conname, confdeltype from pg_constraint "
+                    "where conrelid = 'attendance.case_attachments'::regclass and contype = 'f'")
+        assert cur.fetchall() == [("legacy_attachments_fk", "c")]
+        assert not _has_column(conn, "case_attachments", "voided_at")
+    conn.rollback()
+
+
+def test_migration_refuses_a_duplicate_fk(conn):
+    rollback, forward = _rollback_body()
+    with conn.cursor() as cur:
+        cur.execute(rollback)
+        cur.execute("alter table attendance.audit_log add constraint extra_audit_fk "
+                    "foreign key (case_id) references attendance.cases(id) on delete cascade")
+        with pytest.raises(RaiseException, match="precondition failed on attendance.audit_log"):
+            cur.execute(forward)
+    conn.rollback()
+
+
+def test_migration_refuses_an_unexpected_delete_rule(conn):
+    rollback, forward = _rollback_body()
+    with conn.cursor() as cur:
+        cur.execute(rollback)
+        cur.execute("alter table attendance.case_attachments drop constraint "
+                    "case_attachments_case_id_fkey; alter table attendance.case_attachments "
+                    "add constraint case_attachments_case_id_fkey foreign key (case_id) "
+                    "references attendance.cases(id) on delete set null")
+        with pytest.raises(RaiseException, match="confdeltype n"):
+            cur.execute(forward)
+    conn.rollback()
+
+
+def test_migration_refuses_to_run_twice(conn):
+    _, forward = _rollback_body()
+    with conn.cursor() as cur, pytest.raises(RaiseException, match="precondition failed"):
+        cur.execute(forward)                                   # already applied: rules are RESTRICT
+    conn.rollback()
+
+
+def test_after_migration_exactly_one_restrict_fk_per_column(conn):
+    with conn.cursor() as cur:
+        cur.execute("select con.conrelid::regclass::text, count(*), "
+                    "       string_agg(con.confdeltype::text, '') "
+                    "from pg_constraint con join pg_attribute att "
+                    "  on att.attrelid = con.conrelid and att.attnum = any(con.conkey) "
+                    "where con.contype = 'f' and att.attname = 'case_id' and con.conrelid in "
+                    "  ('attendance.case_attachments'::regclass, 'attendance.audit_log'::regclass) "
+                    "group by 1 order by 1")
+        assert cur.fetchall() == [("attendance.audit_log", 1, "r"),
+                                  ("attendance.case_attachments", 1, "r")]
+    conn.rollback()

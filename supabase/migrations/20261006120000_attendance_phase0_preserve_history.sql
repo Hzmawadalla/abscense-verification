@@ -11,15 +11,50 @@
 -- attachments or audit rows except via remove_upload / reset_all_cases, which now fail with a
 -- foreign-key error instead of silently deleting history.
 --
--- Before applying: confirm the existing constraint names (the DROP ... IF EXISTS below would
--- silently skip a differently named constraint and leave the old CASCADE in place):
---   select conrelid::regclass, conname, confdeltype from pg_constraint
---   where conrelid in ('attendance.case_attachments'::regclass, 'attendance.audit_log'::regclass)
---     and contype = 'f';
--- Expected: case_attachments_case_id_fkey (c = cascade), audit_log_case_id_fkey (n = set null).
+-- SAFETY: the foreign keys are replaced only after a guard has verified the current schema —
+-- exactly one FK on each case_id column, with the expected name and the expected old delete rule
+-- (case_attachments: CASCADE, audit_log: SET NULL). Anything else aborts the whole migration with
+-- an exception, so a renamed or duplicated constraint can never be skipped silently and leave the
+-- old CASCADE in place. A second guard after the change verifies exactly one RESTRICT FK on each
+-- column. Re-running the migration once applied therefore also aborts (rules are already RESTRICT).
+--
+-- REQUIRED PREFLIGHT before applying to production (read-only; expected output below):
+--   select con.conrelid::regclass as tbl, con.conname, con.confdeltype
+--   from pg_constraint con
+--   join pg_attribute att on att.attrelid = con.conrelid and att.attnum = any(con.conkey)
+--   where con.contype = 'f' and att.attname = 'case_id'
+--     and con.conrelid in ('attendance.case_attachments'::regclass, 'attendance.audit_log'::regclass);
+-- Expected exactly two rows:
+--   attendance.case_attachments | case_attachments_case_id_fkey | c   (c = cascade)
+--   attendance.audit_log        | audit_log_case_id_fkey        | n   (n = set null)
 begin;
 
 set search_path = attendance, public;
+
+-- Guard: the schema is what this migration was written against.
+do $$
+declare
+  spec record;
+  n int;
+  nm text;
+  rule text;
+begin
+  for spec in select * from (values
+      ('case_attachments', 'case_attachments_case_id_fkey', 'c'),
+      ('audit_log',        'audit_log_case_id_fkey',        'n')) as s(tbl, expected_name, expected_rule)
+  loop
+    select count(*), min(con.conname::text), min(con.confdeltype::text)
+      into n, nm, rule
+      from pg_constraint con
+      join pg_attribute att on att.attrelid = con.conrelid and att.attnum = any(con.conkey)
+     where con.conrelid = format('attendance.%I', spec.tbl)::regclass
+       and con.contype = 'f' and att.attname = 'case_id';
+    if n <> 1 or nm is distinct from spec.expected_name or rule is distinct from spec.expected_rule then
+      raise exception 'Phase 0 precondition failed on attendance.%: expected exactly 1 FK on case_id named % with confdeltype %, found % FK(s) (name %, confdeltype %). Nothing was changed.',
+        spec.tbl, spec.expected_name, spec.expected_rule, n, nm, rule;
+    end if;
+  end loop;
+end $$;
 
 alter table attendance.case_attachments
   add column if not exists voided_at timestamptz,
@@ -28,11 +63,11 @@ alter table attendance.case_attachments
 create index if not exists case_attachments_active_idx
   on attendance.case_attachments(case_id) where voided_at is null;
 
-alter table attendance.case_attachments drop constraint if exists case_attachments_case_id_fkey;
+alter table attendance.case_attachments drop constraint case_attachments_case_id_fkey;
 alter table attendance.case_attachments add constraint case_attachments_case_id_fkey
   foreign key (case_id) references attendance.cases(id) on delete restrict;
 
-alter table attendance.audit_log drop constraint if exists audit_log_case_id_fkey;
+alter table attendance.audit_log drop constraint audit_log_case_id_fkey;
 alter table attendance.audit_log add constraint audit_log_case_id_fkey
   foreign key (case_id) references attendance.cases(id) on delete restrict;
 
@@ -40,6 +75,27 @@ alter table attendance.cases
   add column if not exists hrbp_override_note text,
   add column if not exists hrbp_override_by   text,
   add column if not exists hrbp_override_at   timestamptz;
+
+-- Post-check: exactly one FK per case_id column, and it is RESTRICT (no CASCADE left behind).
+do $$
+declare
+  t text;
+  n int;
+  rule text;
+begin
+  foreach t in array array['case_attachments', 'audit_log'] loop
+    select count(*), min(con.confdeltype::text)
+      into n, rule
+      from pg_constraint con
+      join pg_attribute att on att.attrelid = con.conrelid and att.attnum = any(con.conkey)
+     where con.conrelid = format('attendance.%I', t)::regclass
+       and con.contype = 'f' and att.attname = 'case_id';
+    if n <> 1 or rule is distinct from 'r' then
+      raise exception 'Phase 0 post-check failed on attendance.%: expected exactly 1 RESTRICT FK on case_id, found % FK(s) (confdeltype %)',
+        t, n, rule;
+    end if;
+  end loop;
+end $$;
 
 commit;
 
