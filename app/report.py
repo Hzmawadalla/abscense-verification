@@ -6,13 +6,14 @@ verification cases, produce a two-sheet .xlsx returned as bytes:
   * "<matrix sheet>" — the original matrix with each closed case's cell overwritten by its final
     verdict label, matched by CRM x date. Only a cell that still reads Absent / No Show is
     overwritten; any other value (a leave, "Normal", a failed/pending leave) is left untouched.
-  * "Changes" — one row per closed case: CRM, Employee, Date, Before, After, TL, Closed by, Comment,
+  * "Changes" — one row per closed case dated within the workbook's period: CRM, Employee, Date, Before, After, TL, Closed by, Comment,
     In workbook?, Overwritten?.
 
 Matching mirrors ingestion exactly (case-insensitive CRM key, same date-header parsing), so a cell
 verified during ingestion maps back to the same cell here.
 """
 import io
+from typing import NamedTuple
 
 import openpyxl
 
@@ -39,6 +40,8 @@ def is_overwritable(cell_value) -> bool:
     if cell_value is None:
         return False
     return _base(normalize(cell_value)) in TRIGGER_EXACT
+
+
 LINKS_HEADER = ["TL name", "CRM", "Email", "Open cases", "Link"]
 
 
@@ -54,40 +57,70 @@ def _locate_header(ws):
     return None, None, None
 
 
-def build_reconciled_report(matrix_path, closed_cases, labels, year,
-                            sheet=MATRIX_SHEET_HINT, staff_gaps=None) -> bytes:
-    """closed_cases: iterable of dicts with keys employee_crm, employee_name, manager_name,
-    work_date (date), source_status, final_status (verdict code), closed_by, manager_comment.
-    labels: {verdict_code: human_label}. Returns the .xlsx as bytes."""
-    closed_cases = list(closed_cases)
-    wb = openpyxl.load_workbook(matrix_path)  # writable (not read_only) so cells can be overwritten
-    try:
-        ws = wb[resolve_sheet(wb, sheet)]
-    except KeyError:
-        ws = wb[wb.sheetnames[0]]
+class ReconcileResult(NamedTuple):
+    """The reconciled .xlsx plus what happened to each case, for the Export tab's summary."""
+    xlsx: bytes
+    period: str              # "2026-06", or "2026-06-26_to_2026-07-25" when the file spans months
+    overwritten: int         # cell was Absent / No Show and now holds the final verdict
+    skipped_not_absent: int  # cell held something else (a leave, Normal...) and was kept
+    not_in_workbook: int     # inside the period, but no row / column for it in this file
+    other_period: int        # outside this file's dates — left out of the Changes sheet
 
+
+def _period_label(dates) -> str:
+    first, last = min(dates), max(dates)
+    if (first.year, first.month) == (last.year, last.month):
+        return f"{first.year}-{first.month:02d}"
+    return f"{first.isoformat()}_to_{last.isoformat()}"
+
+
+def _matrix_index(ws, year):
+    """Return ({date: column}, {crm_key: row}) for the matrix, both 1-based."""
     hdr_row, crm_col, header_vals = _locate_header(ws)
     if hdr_row is None:
         raise ValueError("no 'CRM' column found in the attendance matrix")
-
-    date_cols = {}  # date -> 1-based column
+    date_cols = {}
     for j, h in enumerate(header_vals):
         d = parse_day_header(h, year)
         if d is not None:
             date_cols[d] = j + 1
-
-    # crm_key -> matrix row number, so we can both overwrite the cell and tell whether the
-    # employee is even present in this workbook (a case from another period/file won't be).
+    if not date_cols:
+        raise ValueError(f"no date columns found for year {year} in the attendance matrix")
+    # first row wins, so a duplicated CRM maps to the same cell ingestion verified
     row_by_key = {}
     for r in range(hdr_row + 1, ws.max_row + 1):
         key = _key(_clean(ws.cell(row=r, column=crm_col).value))
         if key and key not in row_by_key:
             row_by_key[key] = r
+    return date_cols, row_by_key
 
+
+def reconcile(matrix, closed_cases, labels, year, sheet=MATRIX_SHEET_HINT,
+              staff_gaps=None) -> ReconcileResult:
+    """matrix: a path or a binary file-like object (e.g. a Streamlit upload).
+    closed_cases: iterable of dicts with keys employee_crm, employee_name, manager_name,
+    work_date (date), source_status, final_status (verdict code), closed_by, manager_comment.
+    labels: {verdict_code: human_label}.
+
+    Only cases dated within the workbook's own date columns are reconciled: closed cases
+    accumulate across periods, and an older or later case has no business in this file."""
+    wb = openpyxl.load_workbook(matrix)  # writable (not read_only) so cells can be overwritten
+    try:
+        ws = wb[resolve_sheet(wb, sheet)]
+    except KeyError:
+        ws = wb[wb.sheetnames[0]]
+    date_cols, row_by_key = _matrix_index(ws, year)
+    first, last = min(date_cols), max(date_cols)
+
+    counts = {OVERWRITTEN: 0, SKIPPED_NOT_ABSENT: 0, SKIPPED_NOT_IN_WORKBOOK: 0}
+    other_period = 0
     ch = wb.create_sheet(CHANGES_SHEET)
     ch.append(CHANGES_HEADER)
     for cs in closed_cases:
         wd = cs.get("work_date")
+        if wd is None or not first <= wd <= last:
+            other_period += 1
+            continue
         row = row_by_key.get(_key(_clean(cs.get("employee_crm"))))
         col = date_cols.get(wd)
         code = cs.get("final_status")
@@ -100,10 +133,11 @@ def build_reconciled_report(matrix_path, closed_cases, labels, year,
             outcome = OVERWRITTEN
         else:
             outcome = SKIPPED_NOT_ABSENT
+        counts[outcome] += 1
         ch.append([
             cs.get("employee_crm"),
             cs.get("employee_name"),
-            wd.isoformat() if wd is not None else None,
+            wd.isoformat(),
             cs.get("source_status"),
             label,
             cs.get("manager_name"),
@@ -121,7 +155,20 @@ def build_reconciled_report(matrix_path, closed_cases, labels, year,
 
     buf = io.BytesIO()
     wb.save(buf)
-    return buf.getvalue()
+    return ReconcileResult(
+        xlsx=buf.getvalue(),
+        period=_period_label(date_cols),
+        overwritten=counts[OVERWRITTEN],
+        skipped_not_absent=counts[SKIPPED_NOT_ABSENT],
+        not_in_workbook=counts[SKIPPED_NOT_IN_WORKBOOK],
+        other_period=other_period,
+    )
+
+
+def build_reconciled_report(matrix, closed_cases, labels, year,
+                            sheet=MATRIX_SHEET_HINT, staff_gaps=None) -> bytes:
+    """The reconciled .xlsx only — see reconcile() for the counts and period."""
+    return reconcile(matrix, closed_cases, labels, year, sheet=sheet, staff_gaps=staff_gaps).xlsx
 
 
 def build_links_workbook(rows) -> bytes:

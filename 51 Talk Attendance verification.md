@@ -51,6 +51,10 @@ link, and lets **HRBP** close or override before results merge back into payroll
      still reads Absent / No Show** (incl. `(HD)` / `- To be confirmed` variants). Any other value
      (a leave, Normal, a failed/pending leave) is kept as HR entered it.
    - Sheet 2 = "Changes" log (CRM · date · before → after · **In workbook?** · **Overwritten?**).
+   - Only cases dated **within the uploaded file's date columns** are included; closed cases from
+     other periods are left out (the tab says how many). The tab reports cells updated, kept
+     (no longer Absent) and missing from the file. Download is named
+     `Attendance_Reconciled_<period>.xlsx`, e.g. `_2026-08` or `_2026-07-26_to_2026-08-25`.
 
 ---
 
@@ -79,7 +83,8 @@ link, and lets **HRBP** close or override before results merge back into payroll
 5. **Everything accumulates; nothing is auto-cleaned.**
    The DB keeps cases from **every file ever ingested**. A corrected re-upload that *drops* a flag
    leaves the old case (and verdict) lingering. Clean test data before a real run; the reconciled
-   export's **"In workbook?"** flag marks cases that belong to another file/period.
+   export leaves out cases dated outside the uploaded file, and its **"In workbook?"** flag marks
+   in-period cases for employees missing from that file.
 
 6. **Keep CRM formats consistent across files.**
    CRM is the join key across HC, Structure, and Summary Report. Mixing exports with different CRM
@@ -96,8 +101,8 @@ link, and lets **HRBP** close or override before results merge back into payroll
    override/close). Tell TLs to review before submitting.
 
 9. **The reconciled export needs the matching workbook and shows only *closed* cases.**
-   Re-upload the file for the period you're reconciling; cases not in that file show
-   **"In workbook? No"**. Open/responded (not-yet-closed) cases won't appear.
+   Re-upload the file for the period you're reconciling (and set the right Year); cases dated
+   outside its columns are left out, and in-period cases with no row show **"In workbook? No"**. Open/responded (not-yet-closed) cases won't appear.
 
 ### ⚙️ Config & security
 

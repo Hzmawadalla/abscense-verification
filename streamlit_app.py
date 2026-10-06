@@ -8,6 +8,7 @@ Run locally:  SUPABASE_DB_URL=postgresql://... streamlit run streamlit_app.py
 On Streamlit Community Cloud, set SUPABASE_DB_URL (and cookie secrets) in the app's Secrets.
 """
 # Deploy marker: 2026-07-12 — force Community Cloud to rebuild onto the Line-Manager mapping.
+import io
 import os
 
 import streamlit as st
@@ -15,7 +16,7 @@ import streamlit as st
 from app import data
 from app.dingtalk import DingTalkClient
 from app.mailer import SMTPMailer
-from app.report import build_links_workbook, build_reconciled_report
+from app.report import build_links_workbook, reconcile
 from app.attachments import (EXPORT_EXPIRES_IN, evidence_columns, filter_by_crm,
                              group_by_case)
 from app.storage import StorageClient, object_path, validate_upload
@@ -274,6 +275,24 @@ def hrbp_authenticator():
         st.stop()
     cookie = st.secrets.get("AUTH_COOKIE_KEY", os.environ.get("AUTH_COOKIE_KEY", "change-me"))
     return stauth.Authenticate(creds, "attendance_auth", cookie, cookie_expiry_days=1)
+
+
+def _show_reconcile_summary(result):
+    """What the export actually did: written vs kept vs missing, not just a case count."""
+    st.success(f"**{result.overwritten}** cell(s) updated to the final verdict "
+               f"(period {result.period.replace('_to_', ' → ')}).")
+    if result.skipped_not_absent:
+        st.info(f"**{result.skipped_not_absent}** case(s) kept HR's value — the cell is no longer "
+                "Absent / No Show (e.g. a leave was approved since). See *Overwritten?* in Changes.")
+    if result.not_in_workbook:
+        st.warning(f"**{result.not_in_workbook}** case(s) in this period have no row or column in "
+                   "this file — listed in Changes as *not in workbook*.")
+    if result.other_period:
+        st.caption(f"{result.other_period} closed case(s) from other periods were left out.")
+    if result.other_period and not (result.overwritten or result.skipped_not_absent
+                                    or result.not_in_workbook):
+        st.warning("No closed case falls inside this file's dates — check the Year, or that this "
+                   "is the right period's workbook.")
 
 
 def render_hrbp():
@@ -596,19 +615,16 @@ def render_hrbp():
             if not closed:
                 st.warning("No closed cases yet — verify and close cases before exporting.")
             else:
-                tmp = f"/tmp/{exp_up.name}"
-                with open(tmp, "wb") as f:
-                    f.write(exp_up.getbuffer())
-                try:
-                    xlsx = build_reconciled_report(tmp, closed, VERDICT_LABEL, year=int(exp_year),
-                                                   staff_gaps=data.list_reference_gaps(c))
+                try:  # read the upload in memory — no temp file shared between sessions
+                    result = reconcile(io.BytesIO(exp_up.getvalue()), closed, VERDICT_LABEL,
+                                       year=int(exp_year), staff_gaps=data.list_reference_gaps(c))
                 except (KeyError, ValueError) as e:
                     st.error(f"Couldn't build the report ({e}). Upload the same workbook that has "
-                             "the **Summary Report** tab.")
+                             "the **Summary Report** tab, and check the Year.")
                 else:
-                    st.success(f"Reconciled {len(closed)} closed case(s). Download below.")
-                    st.download_button("⬇️ Download reconciled report", data=xlsx,
-                                       file_name="Attendance_Reconciled.xlsx",
+                    _show_reconcile_summary(result)
+                    st.download_button("⬇️ Download reconciled report", data=result.xlsx,
+                                       file_name=f"Attendance_Reconciled_{result.period}.xlsx",
                                        mime="application/vnd.openxmlformats-officedocument."
                                             "spreadsheetml.sheet")
 
