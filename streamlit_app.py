@@ -371,7 +371,7 @@ def render_hrbp():
                      })
         st.caption("A case with more than one file links to the first — **Files** shows the total.")
 
-        st.subheader("Override a finalized case (optional)")
+        st.subheader("HRBP Override (optional)")
         st.caption("TL verdicts finalize automatically — use this only to correct a specific case.")
         finalized = data.list_cases(c, status="closed")
         if finalized:
@@ -380,16 +380,29 @@ def render_hrbp():
             pick = st.selectbox("Finalized case", list(label))
             r = label[pick]
             st.write(f"Current final: **{r['final_status']}** · TL said *{r['manager_status'] or '—'}* · "
-                     f"comment: {r['manager_comment'] or '—'}")
+                     f"TL comment: {r['manager_comment'] or '—'}")
+            if r.get("hrbp_override_at"):
+                st.write(f"HRBP Override by **{r['hrbp_override_by']}** at "
+                         f"{r['hrbp_override_at']:%Y-%m-%d %H:%M} — {r['hrbp_override_note'] or '—'}")
             sc = storage_client()
-            for a in data.list_attachments(c, r["id"]):
+
+            def _file_line(a, suffix=""):
                 if sc:
                     try:
-                        st.markdown(f"📎 [{a['filename']}]({sc.signed_url(a['storage_path'])})")
+                        st.markdown(f"📎 [{a['filename']}]({sc.signed_url(a['storage_path'])}){suffix}")
                     except Exception as e:  # noqa: BLE001
-                        st.caption(f"📎 {a['filename']} (link error: {e})")
+                        st.caption(f"📎 {a['filename']}{suffix} (link error: {e})")
                 else:
-                    st.caption(f"📎 {a['filename']} (storage not configured)")
+                    st.caption(f"📎 {a['filename']}{suffix} (storage not configured)")
+
+            for a in data.list_attachments(c, r["id"]):
+                _file_line(a)
+            voided = [a for a in data.list_attachments(c, r["id"], include_voided=True)
+                      if a["voided_at"]]
+            if voided:
+                with st.expander(f"Voided evidence ({len(voided)}) — audit history"):
+                    for a in voided:
+                        _file_line(a, f" · voided {a['voided_at']:%Y-%m-%d} by {a['voided_by']}")
             ov = st.selectbox("Override to", list(HRBP_OVERRIDE_VERDICTS.keys()), key="ov")
             ovc = st.text_input("Reason (required for override)", key="ovc")
             if st.button("Override"):
@@ -398,7 +411,7 @@ def render_hrbp():
                 else:
                     data.close_case(c, r["id"], actor, final_status=HRBP_OVERRIDE_VERDICTS[ov],
                                     comment=ovc)
-                    st.success("Case overridden.")
+                    st.success("HRBP Override saved.")
                     st.rerun()
         else:
             st.caption("No finalized cases yet.")
@@ -446,7 +459,8 @@ def render_hrbp():
             with c.transaction():  # atomic; commits on success WITHOUT closing the pooled
                 db = PsycopgDB(c)   # connection (psycopg3's `with conn:` would close it)
                 loader.load_reference(db, ref)
-                summary = loader.load_ingestion(db, res, reference=ref, source_filename=att_src.name)
+                summary = loader.load_ingestion(db, res, reference=ref, source_filename=att_src.name,
+                                                triggered_by=actor)
             applied = data.set_dingtalk_ids(c, load_dingtalk_ids())
             st.success(f"Loaded {summary.cases} cases, {summary.exceptions} exceptions "
                        f"({ref.stats['mapped_employees']}/{ref.stats['employees']} employees mapped)."
@@ -557,9 +571,11 @@ def render_hrbp():
                 if not submitted:
                     st.caption("Nothing finalized by this TL yet — nothing to void.")
                 else:
-                    st.caption("Voiding **reopens** the selected days and **permanently deletes** their "
-                               "attached proof. The TL's existing link still works — reopened days "
-                               "reappear as pending; use **Email**/**DingTalk** above to notify them.")
+                    st.caption("Voiding **reopens** the selected days so the leader can resubmit. "
+                               "Their answers and screenshots are **kept as audit history** and are "
+                               "no longer shown as current evidence. The TL's existing link still "
+                               "works — reopened days reappear as pending; use **Email**/**DingTalk** "
+                               "above to notify them.")
                     select_all = st.checkbox("Select all", key=f"vall{mgr['id']}")
                     picked = []
                     for cs in submitted:
@@ -571,25 +587,14 @@ def render_hrbp():
                         if select_all or checked:
                             picked.append(cs["id"])
                     reason = st.text_input("Reason (required)", key=f"vr{mgr['id']}")
-                    ack = st.checkbox("I understand the attached proof will be permanently deleted",
-                                      key=f"vack{mgr['id']}")
-                    ready = bool(picked and reason.strip() and ack)
+                    ready = bool(picked and reason.strip())
                     if st.button("Void selected — leader can resubmit",
                                  key=f"vbtn{mgr['id']}", disabled=not ready):
                         res = data.reopen_tl_cases(c, picked, actor, reason.strip())
-                        sc = storage_client()
-                        purged = failed = 0
-                        for p in res["attachment_paths"]:
-                            if sc is None:
-                                break
-                            try:
-                                sc.delete(p)
-                                purged += 1
-                            except Exception:  # noqa: BLE001 — orphaned private file is harmless
-                                failed += 1
                         msg = f"Reopened {res['reopened']} case(s)."
-                        msg += f" Deleted {purged} file(s)." if purged else ""
-                        msg += f" {failed} file(s) couldn't be deleted (harmless)." if failed else ""
+                        if res["attachments_voided"]:
+                            msg += (f" {res['attachments_voided']} file(s) kept as voided "
+                                    "evidence.")
                         msg += f" {res['skipped']} skipped (not TL-submitted)." if res["skipped"] else ""
                         msg += " Now resend the link with Email/DingTalk above."
                         st.success(msg)
@@ -643,28 +648,32 @@ def render_hrbp():
             cols[2].metric("verified", up["verified"])
             cols[3].metric("open", up["open"])
             with cols[4]:
-                if up["verified"]:
-                    ack = st.checkbox(f"⚠️ delete {up['verified']} verified verdict(s)",
-                                      key=f"ack{up['id']}")
-                    typed = st.text_input("type REMOVE", key=f"rm{up['id']}",
-                                          label_visibility="collapsed", placeholder="type REMOVE")
-                    ready = ack and typed.strip() == "REMOVE"
-                else:
-                    ready = st.checkbox("confirm remove", key=f"ack{up['id']}")
+                if up["protected"]:
+                    st.caption(f"🔒 Can't remove — {up['protected']} case(s) have TL answers, "
+                               "evidence or audit history.")
+                    continue
+                ready = st.checkbox("confirm remove", key=f"ack{up['id']}")
                 if st.button("Remove upload", key=f"rmbtn{up['id']}", disabled=not ready):
                     res = data.remove_upload(c, up["id"])
-                    st.success(f"Removed {res['cases_deleted']} case(s) "
-                               f"({res['verified_deleted']} verified).")
-                    st.rerun()
+                    if res.get("refused"):
+                        st.error(f"Not removed — {res['refused']} case(s) now have history.")
+                    else:
+                        st.success(f"Removed {res['cases_deleted']} case(s).")
+                        st.rerun()
 
         st.divider()
         st.error("⚠️ **Clear everything & start fresh** — deletes ALL cases, exceptions, and uploads "
-                 "(keeps managers, employees, links, vocabulary, login). Cannot be undone.")
+                 "(keeps managers, employees, links, vocabulary, login). Cannot be undone. Refused "
+                 "once any case has TL answers, evidence or audit history.")
         typed_all = st.text_input("To confirm, type  CLEAR  in capitals:", key="reset_all")
         if st.button("Clear all case data", type="primary", disabled=(typed_all.strip() != "CLEAR")):
             res = data.reset_all_cases(c)
-            st.success(f"Cleared {res['cases_deleted']} case(s). Start fresh with a new ingest.")
-            st.rerun()
+            if res.get("refused"):
+                st.error(f"Not cleared — {res['refused']} case(s) have history. Resetting live "
+                         "data is a manual, backed-up database step.")
+            else:
+                st.success(f"Cleared {res['cases_deleted']} case(s). Start fresh with a new ingest.")
+                st.rerun()
 
 
 # ============================================================ ROUTER

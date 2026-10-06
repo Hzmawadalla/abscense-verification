@@ -4,6 +4,8 @@ The orchestration takes an injected `DB` executor so it is unit-testable without
 production adapter wraps a psycopg connection. All statements are schema-qualified and idempotent:
 - managers/employees upsert on CRM (never clobbering a manager's issued token),
 - cases upsert on (employee, work_date) WITHOUT resetting an in-flight verification,
+- a re-upload that changes an existing case's source status is audited first, so the value it
+  replaces is never lost,
 - exceptions are recorded per ingestion run."""
 from dataclasses import dataclass
 from typing import Protocol
@@ -54,6 +56,27 @@ on conflict (employee_id, work_date) do update set
   is_half_day = excluded.is_half_day
 """
 
+# Runs BEFORE UPSERT_CASE, once per case candidate: when the case already exists and the new
+# upload brings a different source status (or half-day flag), record the old and new values in
+# the audit log. The upsert below then overwrites source_status as before; without this entry the
+# value it replaces would be gone. The case keeps its owning run (creator-owns), so the "old"
+# ingestion_run_id is that run and the "new" one is the upload being loaded.
+AUDIT_SOURCE_CHANGE = """
+insert into attendance.audit_log (case_id, actor, action, old_value, new_value)
+select c.id, %(actor)s, 'source_status_changed',
+  jsonb_build_object('employee_crm', e.crm, 'work_date', c.work_date,
+                     'source_status', c.source_status, 'is_half_day', c.is_half_day,
+                     'ingestion_run_id', c.ingestion_run_id),
+  jsonb_build_object('employee_crm', e.crm, 'work_date', c.work_date,
+                     'source_status', %(source_status)s::text, 'is_half_day', %(is_half_day)s::boolean,
+                     'ingestion_run_id', %(run_id)s::uuid)
+from attendance.cases c
+join attendance.employees e on e.id = c.employee_id
+where e.crm = %(employee_crm)s and c.work_date = %(work_date)s::date
+  and (c.source_status is distinct from %(source_status)s::text
+       or c.is_half_day is distinct from %(is_half_day)s::boolean)
+"""
+
 INSERT_EXCEPTION = """
 insert into attendance.ingestion_exceptions (ingestion_run_id, crm, work_date, raw_value, reason)
 values (%s, %s, %s, %s, %s)
@@ -78,6 +101,12 @@ def employee_params(e):
 
 def case_params(c, run_id):
     return (c.employee_crm, c.manager_crm, c.work_date, c.source_status, c.is_half_day, run_id)
+
+
+def source_change_params(c, run_id, actor):
+    return {"actor": actor, "employee_crm": c.employee_crm, "work_date": c.work_date,
+            "source_status": c.source_status, "is_half_day": c.is_half_day,
+            "run_id": str(run_id)}
 
 
 @dataclass
@@ -105,6 +134,8 @@ def load_ingestion(db: DB, result, reference=None, source_filename=None, range_s
     total_exc = len(result.exceptions) + len(ref_excs)
     run_id = db.one(INSERT_RUN, (source_filename, range_start, range_end, triggered_by,
                                  len(result.cases), 0, total_exc))[0]
+    actor = f"ingest:{triggered_by or 'system'}"
+    db.many(AUDIT_SOURCE_CHANGE, [source_change_params(c, run_id, actor) for c in result.cases])
     db.many(UPSERT_CASE, [case_params(c, run_id) for c in result.cases])
     exc_rows = [(run_id, e.crm, e.work_date, e.raw_value, e.reason) for e in result.exceptions]
     exc_rows += [(run_id, e.crm, None, e.detail, e.reason) for e in ref_excs]

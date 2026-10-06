@@ -2,7 +2,9 @@
 
 Private bucket; uploads validated (type + size); HRBP views via short-lived signed URLs served as
 downloads (never inline → no stored-XSS against the HRBP session). Uses the service key server-side
-only. HTTP transport is injectable so validation/path logic is unit-testable without network."""
+only. There is deliberately no delete: evidence is audit history — a voided answer's files are
+marked voided in the database, never removed (Phase 0). HTTP transport is injectable so
+validation/path logic is unit-testable without network."""
 import re
 import uuid
 
@@ -57,14 +59,6 @@ class StorageClient:
         if getattr(r, "status_code", 200) >= 300:
             raise StorageError(f"upload failed ({r.status_code}): {r.text}")
         return path
-
-    def delete(self, path: str) -> None:
-        """Remove one object from the private bucket (used when voiding a case's proof)."""
-        r = self._session().delete(
-            f"{self.url}/storage/v1/object/{self.bucket}/{path}",
-            headers=self._auth())
-        if getattr(r, "status_code", 200) >= 300:
-            raise StorageError(f"delete failed ({r.status_code}): {r.text}")
 
     def signed_url(self, path: str, expires_in: int = 3600) -> str:
         r = self._session().post(

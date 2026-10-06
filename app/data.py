@@ -12,9 +12,19 @@ def _audit(cur, case_id, actor, action, old, new):
     cur.execute(
         "insert into attendance.audit_log (case_id, actor, action, old_value, new_value) "
         "values (%s, %s, %s, %s, %s)",
-        (case_id, actor, action, json.dumps(old) if old is not None else None,
-         json.dumps(new) if new is not None else None),
+        (case_id, actor, action, json.dumps(old, default=str) if old is not None else None,
+         json.dumps(new, default=str) if new is not None else None),
     )
+
+
+# A case "has history" once anything beyond its ingestion happened to it: a live answer, any
+# non-open state, any attachment (voided ones included) or any audit entry. A voided case has no
+# live manager_status but still carries its old answer in the audit log and its voided evidence,
+# so checking the live answer alone would wrongly treat it as untouched. Expects alias `c`.
+CASE_HAS_HISTORY = (
+    "(c.manager_status is not null or c.status <> 'open' "
+    " or exists (select 1 from attendance.case_attachments a where a.case_id = c.id) "
+    " or exists (select 1 from attendance.audit_log l where l.case_id = c.id))")
 
 
 # --------------------------------------------------------------------------- HRBP auth
@@ -146,28 +156,26 @@ def reopen_tl_cases(conn, case_ids, actor, reason) -> dict:
     """Void a TL's submitted verdicts so they can resubmit on their existing link.
 
     Reopens only cases the TL finalized themselves (closed_by='tl', status='closed'); any other
-    case in the list is skipped and counted. For each reopened case it nulls the verdict fields
-    (the exact inverse of submit_verdict), removes its attachment rows, and appends an audit entry.
+    case in the list is skipped and counted. For each reopened case it clears the live verdict
+    fields (the exact inverse of submit_verdict) and appends an audit entry whose snapshot keeps
+    the voided answer — verdict, comment, answer time. Nothing is deleted: the case's attachments
+    are marked voided (kept for audit, no longer shown as current evidence) and their storage
+    objects are left in place.
 
-    Returns {'reopened': n, 'skipped': n, 'attachment_paths': [...]}. The paths are the storage
-    objects the caller should purge — storage lives outside this DB transaction.
+    Returns {'reopened': n, 'skipped': n, 'attachments_voided': n}.
     """
     if not case_ids:
-        return {"reopened": 0, "skipped": 0, "attachment_paths": []}
-    reopened = skipped = 0
-    paths = []
+        return {"reopened": 0, "skipped": 0, "attachments_voided": 0}
+    reopened = skipped = voided = 0
     with conn.cursor(row_factory=dict_row) as cur:
         for cid in case_ids:
             cur.execute("select status, manager_status, final_status, leave_type, "
-                        "manager_comment, closed_by from attendance.cases where id = %s", (cid,))
+                        "manager_comment, manager_responded_at, closed_by "
+                        "from attendance.cases where id = %s", (cid,))
             old = cur.fetchone()
             if old is None or old["closed_by"] != "tl" or old["status"] != "closed":
                 skipped += 1
                 continue
-            cur.execute("select storage_path from attendance.case_attachments where case_id = %s",
-                        (cid,))
-            paths.extend(r["storage_path"] for r in cur.fetchall())
-            cur.execute("delete from attendance.case_attachments where case_id = %s", (cid,))
             cur.execute(
                 "update attendance.cases set status = 'open', manager_status = null, "
                 "final_status = null, leave_type = null, manager_comment = null, "
@@ -176,17 +184,23 @@ def reopen_tl_cases(conn, case_ids, actor, reason) -> dict:
             if cur.rowcount == 0:            # raced with another writer since the read
                 skipped += 1
                 continue
+            cur.execute(
+                "update attendance.case_attachments set voided_at = now(), voided_by = %s "
+                "where case_id = %s and voided_at is null returning id", (actor, cid))
+            att_ids = [r["id"] for r in cur.fetchall()]
+            voided += len(att_ids)
             reopened += 1
             _audit(cur, cid, actor, "hrbp_void", dict(old),
-                   {"status": "open", "reason": reason})
+                   {"status": "open", "reason": reason, "voided_attachments": att_ids})
     conn.commit()
-    return {"reopened": reopened, "skipped": skipped, "attachment_paths": paths}
+    return {"reopened": reopened, "skipped": skipped, "attachments_voided": voided}
 
 
 # --------------------------------------------------------------------------- cases (HRBP side)
 def list_cases(conn, status=None, team=None, manager_id=None):
     q = ("select c.id, c.work_date, c.source_status, c.status, c.manager_status, c.leave_type, "
          "       c.manager_comment, c.final_status, c.closed_by, "
+         "       c.hrbp_override_note, c.hrbp_override_by, c.hrbp_override_at, "
          "       e.name as employee_name, e.crm as employee_crm, e.team, m.name as manager_name "
          "from attendance.cases c "
          "join attendance.employees e on e.id = c.employee_id "
@@ -219,25 +233,40 @@ def list_closed_cases(conn):
 
 
 def close_case(conn, case_id, actor, final_status=None, final_leave_type=None, comment=None) -> bool:
-    """Close a case. final_status=None means 'accept the TL verdict'; else HRBP override."""
+    """Close a case. final_status=None means 'accept the TL verdict'; else an HRBP Override.
+
+    An override records its value, the HRBP actor, the time and the reason in the hrbp_override_*
+    columns. The TL's verdict, comment and answer time are never modified, and the audit snapshot
+    keeps them together with any previous override, so repeated overrides stay traceable."""
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("select status, manager_status, leave_type, final_status "
+        cur.execute("select status, manager_status, leave_type, manager_comment, "
+                    "manager_responded_at, final_status, final_leave_type, closed_by, "
+                    "hrbp_override_note, hrbp_override_by, hrbp_override_at "
                     "from attendance.cases where id = %s", (case_id,))
         old = cur.fetchone()
         if old is None:  # allow overriding an already-closed (TL-finalized) case
             return False
-        final = final_status or old["manager_status"]
-        leave = final_leave_type if final_status else old["leave_type"]
-        cur.execute(
-            "update attendance.cases set status = 'closed', final_status = %s, final_leave_type = %s, "
-            "closed_by = 'hrbp', closed_at = now(), "
-            "manager_comment = coalesce(%s, manager_comment) where id = %s",
-            (final, leave, comment, case_id))
+        if final_status:
+            cur.execute(
+                "update attendance.cases set status = 'closed', final_status = %s, "
+                "final_leave_type = %s, closed_by = 'hrbp', closed_at = now(), "
+                "hrbp_override_note = %s, hrbp_override_by = %s, hrbp_override_at = now() "
+                "where id = %s",
+                (final_status, final_leave_type, comment, actor, case_id))
+            final, leave = final_status, final_leave_type
+        else:
+            final, leave = old["manager_status"], old["leave_type"]
+            cur.execute(
+                "update attendance.cases set status = 'closed', final_status = %s, "
+                "final_leave_type = %s, closed_by = 'hrbp', closed_at = now() where id = %s",
+                (final, leave, case_id))
         if cur.rowcount == 0:
             conn.rollback()
             return False
-        _audit(cur, case_id, actor, "hrbp_override" if final_status else "hrbp_close",
-               old, {"final_status": final, "final_leave_type": leave})
+        new = {"final_status": final, "final_leave_type": leave}
+        if final_status:
+            new["hrbp_override_note"] = comment
+        _audit(cur, case_id, actor, "hrbp_override" if final_status else "hrbp_close", old, new)
     conn.commit()
     return True
 
@@ -335,15 +364,19 @@ def add_attachment(conn, case_id, storage_path, filename, content_type, size_byt
     conn.commit()
 
 
-def list_attachments(conn, case_id):
+def list_attachments(conn, case_id, include_voided=False):
+    """A case's evidence. Voided files (from a voided TL answer) are history, not current
+    evidence, so they are left out unless include_voided=True."""
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute("select storage_path, filename, content_type from attendance.case_attachments "
-                    "where case_id = %s order by uploaded_at", (case_id,))
+        cur.execute("select storage_path, filename, content_type, voided_at, voided_by "
+                    "from attendance.case_attachments where case_id = %s "
+                    "and (%s or voided_at is null) order by uploaded_at",
+                    (case_id, include_voided))
         return cur.fetchall()
 
 
 def attachments_for_cases(conn, case_ids):
-    """Every attachment for the given cases, in one query.
+    """Every current (non-voided) attachment for the given cases, in one query.
 
     The HRBP evidence view renders many cases at once; fetching per case would be an N+1.
     Returns flat rows carrying case_id — see `app.attachments.group_by_case`.
@@ -354,7 +387,7 @@ def attachments_for_cases(conn, case_ids):
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute("select case_id, storage_path, filename, content_type "
                     "from attendance.case_attachments where case_id = any(%s) "
-                    "order by case_id, uploaded_at", (ids,))
+                    "and voided_at is null order by case_id, uploaded_at", (ids,))
         return cur.fetchall()
 
 
@@ -366,7 +399,8 @@ def list_uploads(conn):
             "select r.id, r.source_filename, r.created_at, "
             "       count(c.id) as total, "
             "       count(c.id) filter (where c.manager_status is not null) as verified, "
-            "       count(c.id) filter (where c.status = 'open') as open "
+            "       count(c.id) filter (where c.status = 'open') as open, "
+            f"       count(c.id) filter (where {CASE_HAS_HISTORY}) as protected "
             "from attendance.ingestion_runs r "
             "left join attendance.cases c on c.ingestion_run_id = r.id "
             "group by r.id, r.source_filename, r.created_at "
@@ -374,23 +408,42 @@ def list_uploads(conn):
         return cur.fetchall()
 
 
+def _count_with_history(cur, where_sql, params=()):
+    cur.execute(f"select count(*) from attendance.cases c where {where_sql} "
+                f"and {CASE_HAS_HISTORY}", params)
+    return cur.fetchone()[0]
+
+
 def remove_upload(conn, run_id) -> dict:
-    """Delete one upload: its cases (by ingestion_run_id) then the run (exceptions cascade).
-    Returns how many cases — and how many of them verified — were removed."""
+    """Delete one upload — only if none of its cases has history (CASE_HAS_HISTORY).
+
+    Returns {'refused': n} without deleting anything when n case(s) carry an answer, evidence or
+    audit history; otherwise deletes the cases (by ingestion_run_id) then the run (exceptions
+    cascade) and returns {'cases_deleted': n}. The database backs this up: a case with
+    attachments or audit entries cannot be deleted (those foreign keys are RESTRICT)."""
     with conn.cursor() as cur:
-        cur.execute("select count(*), count(*) filter (where manager_status is not null) "
-                    "from attendance.cases where ingestion_run_id = %s", (run_id,))
-        total, verified = cur.fetchone()
+        protected = _count_with_history(cur, "c.ingestion_run_id = %s", (run_id,))
+        if protected:
+            conn.rollback()
+            return {"refused": protected}
+        cur.execute("select count(*) from attendance.cases where ingestion_run_id = %s", (run_id,))
+        total = cur.fetchone()[0]
         cur.execute("delete from attendance.cases where ingestion_run_id = %s", (run_id,))
         cur.execute("delete from attendance.ingestion_runs where id = %s", (run_id,))
     conn.commit()
-    return {"cases_deleted": total, "verified_deleted": verified}
+    return {"cases_deleted": total}
 
 
 def reset_all_cases(conn) -> dict:
-    """Clear all case data (cases, ingestion exceptions, ingestion runs) for a fresh start.
-    Managers, employees, TL tokens, status vocabulary, and HRBP logins are preserved."""
+    """Clear all case data (cases, ingestion exceptions, ingestion runs) for a fresh start — only
+    while no case has history. Managers, employees, TL tokens, status vocabulary, and HRBP logins
+    are preserved. Returns {'refused': n} when n case(s) carry history: a reset of live data is a
+    manual SQL step taken after a backup, never a button."""
     with conn.cursor() as cur:
+        protected = _count_with_history(cur, "true")
+        if protected:
+            conn.rollback()
+            return {"refused": protected}
         cur.execute("select count(*) from attendance.cases")
         n = cur.fetchone()[0]
         cur.execute("delete from attendance.cases")
