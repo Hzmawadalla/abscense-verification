@@ -8,6 +8,7 @@ Run locally:  SUPABASE_DB_URL=postgresql://... streamlit run streamlit_app.py
 On Streamlit Community Cloud, set SUPABASE_DB_URL (and cookie secrets) in the app's Secrets.
 """
 # Deploy marker: 2026-07-12 — force Community Cloud to rebuild onto the Line-Manager mapping.
+import hashlib
 import io
 import logging
 import os
@@ -424,7 +425,7 @@ def render_hrbp():
                                   type=["xlsx"], key="ref_wb")
         att_up = st.file_uploader("Attendance report — Summary Report tab (.xlsx)",
                                   type=["xlsx"], key="att_wb")
-        year = st.number_input("Year for the date columns", 2024, 2100, 2026)
+        year = st.number_input("Year for the date columns", 2024, 2100, 2026, help="Year of the FIRST date column; a 15-Dec → 14-Jan sheet rolls into the next year automatically.")
         if st.button("Parse & load", type="primary"):
             if not (ref_up or att_up):
                 st.warning("Upload at least one workbook.")
@@ -454,11 +455,19 @@ def render_hrbp():
                          "**Summary Report** sheet (from the attendance tool).")
                 st.stop()
 
+            att_sha = hashlib.sha256(att_src.getvalue()).hexdigest()
+            earlier = data.uploads_with_hash(c, att_sha)
+            if earlier:   # allowed: the new upload becomes the active source, values unchanged
+                st.warning(f"This exact file was already uploaded {len(earlier)} time(s) (first "
+                           f"{earlier[0]['created_at']:%Y-%m-%d %H:%M}). Loading it again makes it "
+                           "the newest source; its values are the same.")
+            first_day, last_day = res.stats["date_range"]
             with c.transaction():  # atomic; commits on success WITHOUT closing the pooled
                 db = PsycopgDB(c)   # connection (psycopg3's `with conn:` would close it)
                 loader.load_reference(db, ref)
                 summary = loader.load_ingestion(db, res, reference=ref, source_filename=att_src.name,
-                                                triggered_by=actor)
+                                                triggered_by=actor, range_start=first_day,
+                                                range_end=last_day, file_sha256=att_sha)
             applied = data.set_dingtalk_ids(c, load_dingtalk_ids())
             st.success(f"Loaded {summary.cases} cases, {summary.exceptions} exceptions "
                        f"({ref.stats['mapped_employees']}/{ref.stats['employees']} employees mapped)."
@@ -612,7 +621,7 @@ def render_hrbp():
                  "case updated to its final verdict, plus a **Changes** sheet of before → after.")
         exp_up = st.file_uploader("Attendance report — Summary Report tab (.xlsx)",
                                   type=["xlsx"], key="exp_wb")
-        exp_year = st.number_input("Year for the date columns", 2024, 2100, 2026, key="exp_year")
+        exp_year = st.number_input("Year for the date columns", 2024, 2100, 2026, key="exp_year", help="Year of the FIRST date column; a 15-Dec → 14-Jan sheet rolls into the next year automatically.")
         if exp_up and st.button("Build reconciled report", type="primary"):
             closed = data.list_closed_cases(c)
             if not closed:

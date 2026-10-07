@@ -140,4 +140,6 @@ def test_reset_all_cases_clears_everything_but_not_managers_when_untouched():
     assert "delete from attendance.cases" in joined
     assert "delete from attendance.ingestion_exceptions" in joined
     assert "delete from attendance.ingestion_runs" in joined
+    assert joined.index("delete from attendance.attendance_days") < joined.index(
+        "delete from attendance.ingestion_runs")        # cells go before their upload (Phase 1)
     assert "managers" not in joined       # reference data is never touched

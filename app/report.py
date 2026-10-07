@@ -19,7 +19,7 @@ import openpyxl
 
 from ingestion.reference import _clean, _key
 from ingestion.status_rules import TRIGGER_EXACT, _base, normalize
-from ingestion.summary import parse_day_header
+from ingestion.summary import date_columns
 from ingestion.workbook import norm_header, resolve_sheet
 
 CHANGES_SHEET = "Changes"
@@ -79,11 +79,9 @@ def _matrix_index(ws, year):
     hdr_row, crm_col, header_vals = _locate_header(ws)
     if hdr_row is None:
         raise ValueError("no 'CRM' column found in the attendance matrix")
-    date_cols = {}
-    for j, h in enumerate(header_vals):
-        d = parse_day_header(h, year)
-        if d is not None:
-            date_cols[d] = j + 1
+    # same dating as ingestion (incl. the December -> January rollover), so a cross-year sheet
+    # maps back to the very cells ingestion created cases from
+    date_cols = {d: j + 1 for j, d in date_columns(header_vals, year)}
     if not date_cols:
         raise ValueError(f"no date columns found for year {year} in the attendance matrix")
     # first row wins, so a duplicated CRM maps to the same cell ingestion verified
