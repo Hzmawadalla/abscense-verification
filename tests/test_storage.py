@@ -66,17 +66,7 @@ def test_upload_raises_on_error_status():
         c.upload("case-1/x.pdf", b"data", "application/pdf")
 
 
-def test_delete_calls_object_endpoint_and_succeeds():
-    http = _Http(_Resp(200))
-    c = storage.StorageClient("https://proj.supabase.co", "svc", http=http)
-    c.delete("case-1/x.pdf")
-    assert http.calls[-1]["method"] == "delete"
-    assert http.calls[-1]["url"] == \
-        "https://proj.supabase.co/storage/v1/object/case-attachments/case-1/x.pdf"
-
-
-def test_delete_raises_on_error_status():
-    http = _Http(_Resp(404, text="not found"))
-    c = storage.StorageClient("https://proj.supabase.co", "svc", http=http)
-    with pytest.raises(storage.StorageError):
-        c.delete("case-1/missing.pdf")
+def test_storage_client_cannot_delete_evidence():
+    # Evidence is audit history: voiding marks files voided in the database and never removes
+    # the object. Without a delete method, no code path can quietly bring the purge back.
+    assert not hasattr(storage.StorageClient, "delete")
