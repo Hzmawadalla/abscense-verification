@@ -290,3 +290,39 @@ def test_end_to_end_cross_year_workbook(conn, tmp_path):
     assert g[("E-1", D(2027, 1, 1))]["status"] == "Leave"              # 01-Jan -> 2027, masked
     assert g[("E-1", D(2027, 1, 14))]["coverage"] == "full"
     assert _q(conn, "select work_date from attendance.cases")[0]["work_date"] == D(2026, 12, 31)
+
+
+# ------------------------------------------------------------------ security fixes (review of PR #9)
+def test_case_only_employee_visible_only_on_case_days(conn, org):
+    d1, d2 = P, P + datetime.timedelta(days=1)
+    # E-3 is on TL-B's team; TL-A gets visibility only because of the d2 case assigned to TL-A
+    _load(conn, [_cell("E-3", d1, "Sick Leave", tl="TL-B"),
+                 _cell("E-3", d2, "Absent", "trigger", tl="TL-B")],
+          cases=[CaseCandidate("E-3", "TL-A", d2, "Absent")])
+    g = _grid(tl_period_attendance(conn, org["TL-A"], P))
+    other_day = g[("E-3", d1)]
+    assert other_day["visibility"] == "case_only"
+    assert other_day["status"] is None and other_day["bucket"] is None    # withheld
+    assert other_day["coverage"] == "none" and other_day["case_id"] is None
+    case_day = g[("E-3", d2)]
+    assert case_day["status"] == "Absent" and case_day["pending"] and case_day["case_id"]
+    assert all(r["visibility"] == "team" for r in tl_period_attendance(conn, org["TL-A"], P)
+               if r["employee_crm"] != "E-3")
+    # TL-B (E-3's own TL) still sees every day
+    own = _grid(tl_period_attendance(conn, org["TL-B"], P))
+    assert own[("E-3", d1)]["status"] == "Leave" and own[("E-3", d1)]["visibility"] == "team"
+
+
+def test_unclassified_and_case_text_never_reach_the_tl_raw(conn, org):
+    d1, d2 = P, P + datetime.timedelta(days=1)
+    _load(conn, [_cell("E-1", d1, "Hospital visit, see doctor note", "unknown", canon=None)])
+    _q(conn, "insert into attendance.cases (employee_id, manager_id, work_date, source_status) "
+             "values (%s, %s, %s, 'Bereavement Leave - To Be Confirmed')",
+       (org["E-1"], org["TL-A"], d2))                                  # flagged-only, raw text
+    g = _grid(tl_period_attendance(conn, org["TL-A"], P))
+    assert g[("E-1", d1)]["status"] == "Unclassified"
+    assert g[("E-1", d2)]["coverage"] == "flagged_only" and g[("E-1", d2)]["status"] == "Leave"
+    tl_text = repr(tl_period_attendance(conn, org["TL-A"], P))
+    assert "Hospital" not in tl_text and "Bereavement" not in tl_text and "To Be Confirmed" not in tl_text
+    hrbp = _grid(hrbp_period_attendance(conn, P))
+    assert hrbp[("E-1", d1)]["raw_value"] == "Hospital visit, see doctor note"   # HRBP exact

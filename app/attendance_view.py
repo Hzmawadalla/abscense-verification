@@ -15,6 +15,7 @@ reviewed before any TL full-attendance UI built on this contract is released.
 from psycopg.rows import dict_row
 
 from ingestion.periods import attendance_period, period_dates
+from ingestion.status_rules import classify
 
 # The TL's team for a period: employees currently assigned to the TL, PLUS employees with a case
 # assigned to the TL inside the period (so a TL keeps sight of cases they must still answer after
@@ -123,23 +124,49 @@ _TL_FIELDS = ("employee_id", "employee_crm", "employee_name", "work_date", "peri
               "employment")
 
 
-def tl_period_attendance(conn, manager_id, period_start):
-    """The TL's team (current members + employees with a case assigned to this TL in the period)
-    x every day of the 15th -> 14th period, TL-safe.
+UNCLASSIFIED = "Unclassified"
 
-    Exposes a whitelist only: leave types are generalised in `status` (from the active cell, or
-    the case's source for flagged-only coverage), `tl_answer` and `hrbp_override_value`; raw cell
-    text, HRBP note/actor, comments and evidence are never returned."""
+# A "case-only" employee (on another TL's team, included only because a case is assigned to this TL
+# in the period) is visible ONLY on those case days; every other day of theirs is withheld.
+_WITHHELD = {"status": None, "bucket": None, "is_half_day": False, "coverage": "none",
+             "flagged": False, "pending": False, "case_id": None, "case_status": None,
+             "tl_answer": None, "tl_answered_at": None, "hrbp_overridden": False,
+             "hrbp_override_value": None, "source_changed_since_response": False,
+             "employment": None}
+
+
+def _tl_status(r):
+    """TL-facing status: classified statuses only, leave generalised; never raw cell text."""
+    if r["coverage"] == "full":
+        if r["bucket"] == "unknown":          # free text the rules don't know: never shown raw
+            return UNCLASSIFIED
+        return tl_safe_status(r["canonical_status"])
+    if r["case_source_status"]:               # flagged-only: classify the case's source text too
+        canonical = classify(r["case_source_status"])[1]
+        return tl_safe_status(canonical) if canonical else UNCLASSIFIED
+    return None
+
+
+def tl_period_attendance(conn, manager_id, period_start):
+    """The TL's team x every day of the 15th -> 14th period, TL-safe.
+
+    `manager_id` MUST come from the TL's own link (data.manager_by_token), never from user input.
+
+    Team = employees currently assigned to this TL (`visibility = "team"`, every day), plus
+    employees with a case assigned to this TL in the period (`visibility = "case_only"`, ONLY those
+    case days — all their other days are withheld). Exposes a whitelist only: `status` is a
+    classified status with leave generalised to "Leave" (unclassified text -> "Unclassified");
+    raw cell text, HRBP note/actor, comments and evidence are never returned."""
     out = []
     for r in hrbp_period_attendance(conn, period_start, manager_id=manager_id):
         row = {k: r[k] for k in _TL_FIELDS}
-        if r["coverage"] == "full":   # unclassified text has no canonical status: mask the raw
-            source = r["canonical_status"] or (r["raw_value"] if r["bucket"] == "unknown" else None)
-        else:
-            source = r["case_source_status"]
-        row["status"] = tl_safe_status(source)
+        row["status"] = _tl_status(r)
         row["tl_answer"] = tl_safe_status(r["tl_answer"])
         row["hrbp_override_value"] = (tl_safe_status(r["final_status"])
                                       if r["hrbp_overridden"] else None)
+        member = r["current_manager_id"] == manager_id
+        row["visibility"] = "team" if member else "case_only"
+        if not member and not (r["case_id"] and r["case_manager_id"] == manager_id):
+            row.update(_WITHHELD)
         out.append(row)
     return out
