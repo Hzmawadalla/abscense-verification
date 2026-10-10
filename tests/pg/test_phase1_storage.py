@@ -226,8 +226,8 @@ def test_tl_grid_answered_overridden_and_flagged_only(conn, org):
     _q(conn, "insert into attendance.cases (employee_id, manager_id, work_date, source_status) "
              "values (%s, %s, %s, 'No Show')", (org["E-1"], org["TL-A"], d3))
     g = _grid(tl_period_attendance(conn, org["TL-A"], P))
-    assert g[("E-1", d1)]["tl_answer"] == "present" and not g[("E-1", d1)]["pending"]
-    assert g[("E-1", d2)]["hrbp_overridden"] and g[("E-1", d2)]["hrbp_override_value"] == "leave"
+    assert g[("E-1", d1)]["tl_answer"] == "Present" and not g[("E-1", d1)]["pending"]
+    assert g[("E-1", d2)]["hrbp_overridden"] and g[("E-1", d2)]["hrbp_override_value"] == "Leave"
     assert g[("E-1", d3)]["coverage"] == "flagged_only" and g[("E-1", d3)]["pending"]
     assert g[("E-1", d3)]["status"] == "No Show"
 
@@ -247,7 +247,7 @@ def test_source_changed_since_response(conn, org):
     g = _grid(tl_period_attendance(conn, org["TL-A"], P))
     assert g[("E-1", d1)]["source_changed_since_response"]
     assert g[("E-1", d2)]["source_changed_since_response"]
-    assert g[("E-1", d1)]["tl_answer"] == "absent"                     # answer never erased
+    assert g[("E-1", d1)]["tl_answer"] == "Absent"                     # answer never erased
 
 
 def test_period_start_must_be_a_15th(conn, org):
@@ -326,3 +326,35 @@ def test_unclassified_and_case_text_never_reach_the_tl_raw(conn, org):
     assert "Hospital" not in tl_text and "Bereavement" not in tl_text and "To Be Confirmed" not in tl_text
     hrbp = _grid(hrbp_period_attendance(conn, P))
     assert hrbp[("E-1", d1)]["raw_value"] == "Hospital visit, see doctor note"   # HRBP exact
+
+
+def test_tl_contract_is_fail_closed_on_every_bucket_path(conn, org):
+    """H1: canonical_status can echo free text ('Hospital Visit - check' -> 'Hospital Visit');
+    the TL contract must still return approved labels only, on full and flagged-only days."""
+    from app.attendance_view import TL_ROW_FIELDS
+    from app.tl_labels import FLAGGED, LEAVE, TL_LABELS, UNCLASSIFIED
+    from ingestion.status_rules import classify
+    raws = ["Hospital visit - check", "Surgery (Pending)",
+            "Doctor appointment - deducted from balance", "Sick Leave - had surgery",
+            "annual_leave", "  ABSENT  ", "Weird free text"]
+    cells = []
+    for i, raw in enumerate(raws):
+        bucket, canon, hd = classify(raw)
+        cells.append(_cell("E-1", P + datetime.timedelta(days=i), raw, bucket,
+                           canon=canon or "", hd=hd))
+    _load(conn, cells)
+    flagged_only_day = P + datetime.timedelta(days=20)
+    _q(conn, "insert into attendance.cases (employee_id, manager_id, work_date, source_status) "
+             "values (%s, %s, %s, 'Clinic visit (Failed)')", (org["E-1"], org["TL-A"], flagged_only_day))
+    rows = tl_period_attendance(conn, org["TL-A"], P)
+    assert all(tuple(r) == TL_ROW_FIELDS for r in rows)
+    assert all(r["status"] is None or r["status"] in TL_LABELS for r in rows)
+    g = _grid(rows)
+    assert [g[("E-1", P + datetime.timedelta(days=i))]["status"] for i in range(len(raws))] == [
+        FLAGGED, FLAGGED, UNCLASSIFIED, LEAVE, LEAVE, "Absent", UNCLASSIFIED]
+    assert g[("E-1", flagged_only_day)]["status"] == FLAGGED
+    text = repr(rows)
+    for word in ("Hospital", "Surgery", "Doctor", "surgery", "Clinic", "Weird", "deducted"):
+        assert word not in text
+    hrbp = _grid(hrbp_period_attendance(conn, P))
+    assert hrbp[("E-1", P)]["raw_value"] == "Hospital visit - check"            # HRBP exact

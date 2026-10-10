@@ -5,8 +5,9 @@ Original Attendance (the active source cell), TL Response, HRBP Override, Pendin
 Source Changed and Coverage — for the future TL full-attendance view (Phase 2/3 decide how they
 combine).
 
-tl_period_attendance  — TL-facing: the TL's team only, and leave types generalised to "Leave";
-                        no raw cell text, no HRBP note/actor, no comments or evidence.
+tl_period_attendance  — TL-facing: the TL's team only; statuses are app.tl_labels labels (fail
+                        closed: leave -> "Leave", unrecognised -> "Flagged — review required" or
+                        "Unclassified"); no raw cell text, HRBP note/actor, comments or evidence.
 hrbp_period_attendance — HRBP-facing: exact values, all employees (or one TL's team).
 
 SECURITY GATE (not Phase 1): TL links never expire. The non-expiring private-link model must be
@@ -14,8 +15,8 @@ reviewed before any TL full-attendance UI built on this contract is released.
 """
 from psycopg.rows import dict_row
 
+from app.tl_labels import tl_status_label, tl_verdict_label
 from ingestion.periods import attendance_period, period_dates
-from ingestion.status_rules import classify
 
 # The TL's team for a period: employees currently assigned to the TL, PLUS employees with a case
 # assigned to the TL inside the period (so a TL keeps sight of cases they must still answer after
@@ -59,26 +60,6 @@ select e.id as employee_id, e.crm as employee_crm, e.name as employee_name, e.te
  order by e.name, e.crm, d.work_date
 """
 
-# TL-facing verdict codes: legacy/override leave codes generalise like statuses do.
-_LEAVE_CODES = {"annual_leave", "sick_leave", "unpaid_leave", "leave"}
-
-
-def tl_safe_status(value):
-    """Generalise any leave type (Sick, Bereavement, Marriage, Paternity, Annual, …) to "Leave".
-
-    Attendance categories (Normal, Late, Absent, No Show, Half Day, Weekend, Public Holiday,
-    Not Yet Hired …) are returned unchanged. "No Leave" is not a leave."""
-    if value is None:
-        return None
-    s = str(value).strip()
-    low = s.lower()
-    if low in _LEAVE_CODES:
-        return "leave"
-    if "leave" in low and low != "no leave":
-        return "Leave"
-    return s
-
-
 def _period(period_start):
     dates = period_dates(period_start)          # raises unless period_start is a 15th
     return dates[0], dates[-1]
@@ -118,13 +99,11 @@ def hrbp_period_attendance(conn, period_start, manager_id=None):
     return _grid(conn, ps, pe, _TEAM_SQL, {"manager_id": manager_id})
 
 
-_TL_FIELDS = ("employee_id", "employee_crm", "employee_name", "work_date", "period_start",
-              "period_end", "bucket", "is_half_day", "coverage", "flagged", "pending", "case_id",
-              "case_status", "tl_answered_at", "hrbp_overridden", "source_changed_since_response",
-              "employment")
-
-
-UNCLASSIFIED = "Unclassified"
+# Exactly what a TL row carries, in order (the TL data-contract whitelist; tests assert it).
+TL_ROW_FIELDS = ("employee_id", "employee_crm", "employee_name", "work_date", "period_start",
+                 "period_end", "bucket", "is_half_day", "coverage", "flagged", "pending", "case_id",
+                 "case_status", "tl_answered_at", "hrbp_overridden", "source_changed_since_response",
+                 "employment", "status", "tl_answer", "hrbp_override_value", "visibility")
 
 # A "case-only" employee (on another TL's team, included only because a case is assigned to this TL
 # in the period) is visible ONLY on those case days; every other day of theirs is withheld.
@@ -136,14 +115,14 @@ _WITHHELD = {"status": None, "bucket": None, "is_half_day": False, "coverage": "
 
 
 def _tl_status(r):
-    """TL-facing status: classified statuses only, leave generalised; never raw cell text."""
+    """TL-facing status through the fail-closed label policy (app.tl_labels): decided from the raw
+    text, never from canonical_status, so free text can never reach a TL."""
     if r["coverage"] == "full":
-        if r["bucket"] == "unknown":          # free text the rules don't know: never shown raw
-            return UNCLASSIFIED
-        return tl_safe_status(r["canonical_status"])
-    if r["case_source_status"]:               # flagged-only: classify the case's source text too
-        canonical = classify(r["case_source_status"])[1]
-        return tl_safe_status(canonical) if canonical else UNCLASSIFIED
+        if r["bucket"] == "blank":
+            return None
+        return tl_status_label(r["raw_value"], flagged=r["bucket"] == "trigger")
+    if r["coverage"] == "flagged_only":       # a case exists only for a flagged day
+        return tl_status_label(r["case_source_status"], flagged=True)
     return None
 
 
@@ -154,19 +133,19 @@ def tl_period_attendance(conn, manager_id, period_start):
 
     Team = employees currently assigned to this TL (`visibility = "team"`, every day), plus
     employees with a case assigned to this TL in the period (`visibility = "case_only"`, ONLY those
-    case days — all their other days are withheld). Exposes a whitelist only: `status` is a
-    classified status with leave generalised to "Leave" (unclassified text -> "Unclassified");
-    raw cell text, HRBP note/actor, comments and evidence are never returned."""
+    case days — all their other days are withheld). Every row carries exactly TL_ROW_FIELDS:
+    `status`, `tl_answer` and `hrbp_override_value` are app.tl_labels labels; raw cell text, HRBP
+    note/actor, comments and evidence are never returned."""
     out = []
     for r in hrbp_period_attendance(conn, period_start, manager_id=manager_id):
-        row = {k: r[k] for k in _TL_FIELDS}
+        row = dict(r)
         row["status"] = _tl_status(r)
-        row["tl_answer"] = tl_safe_status(r["tl_answer"])
-        row["hrbp_override_value"] = (tl_safe_status(r["final_status"])
+        row["tl_answer"] = tl_verdict_label(r["tl_answer"])
+        row["hrbp_override_value"] = (tl_verdict_label(r["final_status"])
                                       if r["hrbp_overridden"] else None)
         member = r["current_manager_id"] == manager_id
         row["visibility"] = "team" if member else "case_only"
         if not member and not (r["case_id"] and r["case_manager_id"] == manager_id):
             row.update(_WITHHELD)
-        out.append(row)
+        out.append({k: row[k] for k in TL_ROW_FIELDS})
     return out

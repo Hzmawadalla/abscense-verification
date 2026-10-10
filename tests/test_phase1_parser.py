@@ -6,7 +6,6 @@ import io
 import openpyxl
 import pytest
 
-from app.attendance_view import tl_safe_status
 from app.report import reconcile
 from ingestion import loader
 from ingestion.periods import attendance_period, period_dates
@@ -201,16 +200,3 @@ def test_loader_records_range_hash_full_cells_and_stores_cells_last(sample_workb
                                             loader.INSERT_EXCEPTION, loader.INSERT_DAY]
     day_rows = db.calls[4][2]
     assert len(day_rows) == len(res.cells) and all(r[0] == "run-1" for r in day_rows)
-
-
-# ---------------------------------------------------------------- TL leave masking
-@pytest.mark.parametrize("value, shown", [
-    ("Sick Leave", "Leave"), ("Bereavement Leave", "Leave"), ("Marriage Leave", "Leave"),
-    ("Paternity Leave", "Leave"), ("Annual Leave", "Leave"), ("Leave Approval Pending", "Leave"),
-    ("sick_leave", "leave"), ("annual_leave", "leave"),
-    ("Normal", "Normal"), ("Absent", "Absent"), ("No Show", "No Show"), ("Late", "Late"),
-    ("Half Day", "Half Day"), ("Not Yet Hired", "Not Yet Hired"), ("No Leave", "No Leave"),
-    ("present", "present"), (None, None),
-])
-def test_tl_safe_status(value, shown):
-    assert tl_safe_status(value) == shown
