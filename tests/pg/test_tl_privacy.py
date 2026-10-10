@@ -57,7 +57,8 @@ def test_tl_rows_carry_labels_only_and_hrbp_keeps_the_original(conn, seed):
     assert [by_day[d]["status_label"] for d in range(1, 7)] == [
         FLAGGED, FLAGGED, LEAVE, "Absent", "Absent", LEAVE]
     assert by_day[5]["own_comment"] == "called twice, no answer" and by_day[5]["id"] == own
-    assert by_day[6]["own_comment"] is None and by_day[6]["verdict_label"] == LEAVE
+    assert by_day[6]["own_comment"] is None and by_day[6]["verdict_label"] is None  # not theirs
+    assert by_day[5]["verdict_label"] == "Absent"
     text = repr(rows)
     for word in SECRET_WORDS:
         assert word not in text

@@ -110,8 +110,8 @@ def tl_actor(manager) -> str:
 
 
 def tl_cases_for_manager(conn, manager):
-    """The TL page's cases, TL-safe: approved labels only (app.tl_labels), and a comment only when
-    THIS TL wrote it (the case's latest tl_verdict audit entry is theirs) — a case that changed hands
+    """The TL page's cases, TL-safe: approved labels only (app.tl_labels), and a verdict and comment
+    only when THIS TL wrote them (the case's latest tl_verdict audit entry is theirs) — a case that changed hands
     never shows the previous TL's note. `manager` is the row from manager_by_token."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
@@ -131,7 +131,9 @@ def tl_cases_for_manager(conn, manager):
              "status": r["status"], "employee_name": r["employee_name"],
              "employee_crm": r["employee_crm"],
              "status_label": tl_status_label(r["source_status"], flagged=True),
-             "verdict_label": tl_verdict_label(r["manager_status"]),
+             # another TL's answer (a case that changed hands) is neither shown nor attributed
+             "verdict_label": tl_verdict_label(r["manager_status"]) if r["verdict_actor"] == me
+                              else None,
              "own_comment": r["manager_comment"] if r["verdict_actor"] == me else None}
             for r in rows]
 
