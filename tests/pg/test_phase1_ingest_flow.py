@@ -78,8 +78,14 @@ def test_parse_and_preview_write_nothing(conn, tmp_path):
     assert set(_counts(conn).values()) == {0}
 
 
-def test_rejected_workbook_writes_nothing(conn, tmp_path):
-    path = _workbook(tmp_path, [["E-1", "Absent", "Normal"]], headers=("06-May", "06-May"))
+@pytest.mark.parametrize("headers, values", [
+    (("06-May", "06-May"), ("Absent", "Normal")),       # conflicting repeated date
+    (("06-May", "06-May"), ("Absent", None)),           # blank vs non-blank
+    (("06-May", "05-Apr"), ("Absent", "Normal")),       # out of order
+    (("15-Jul", "15-Jan"), ("Absent", "Normal")),       # ambiguous year step
+])
+def test_rejected_workbook_writes_nothing(conn, tmp_path, headers, values):
+    path = _workbook(tmp_path, [["E-1", *values]], headers=headers)
     with pytest.raises(UnsafeWorkbookError):
         ingest_summary(path, parse_reference(path), year=2026)
     assert set(_counts(conn).values()) == {0}

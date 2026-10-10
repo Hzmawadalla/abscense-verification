@@ -59,22 +59,34 @@ def parse_day_header(h, year):
     return None
 
 
+# A year-less month that steps BACK means either "the sheet crossed into the next year" or "this
+# column is out of order"; the two are told apart by the forward distance to the new month. Up to
+# 5 months forward (Dec -> Jan is 1, Oct -> Jan is 3, Aug -> Jan is 5) is a year rollover. A
+# forward distance of 6 or more (Jul -> Jan, or May -> Apr = 11) is equally readable as a column
+# out of order, so it is NOT rolled over; the left-as-is date then steps backwards and
+# resolve_date_columns rejects the upload instead of guessing. This bounds the size of a GAP
+# between neighbouring date columns, never the length of a sheet: a contiguous sheet of any length
+# rolls over at each Dec -> Jan.
+MAX_ROLLOVER_GAP_MONTHS = 5
+
+
 def date_columns(header, year):
     """[(column_index, date)] for every date header in a row, in column order.
 
     `year` is the year of the FIRST year-less header ('15-Dec'). Year-less headers are dated in
-    order, and when their month steps back across the year boundary (Dec → Jan, or Nov → Jan with
-    December absent) every following year-less header moves to the next year — so a
-    15-Dec … 14-Jan sheet entered as 2026 yields 2026-12-15 … 2027-01-14. Any other backwards
-    step is left as-is (an out-of-order sheet keeps today's behaviour). Headers that carry their
-    own year (a real date cell, '06-May-2026') are never shifted. Shared by ingestion and the
-    reconciled export so both date a sheet identically."""
+    order, and when their month steps back across the year boundary (see MAX_ROLLOVER_GAP_MONTHS)
+    every following year-less header moves to the next year — so a 15-Dec … 14-Jan sheet entered
+    as 2026 yields 2026-12-15 … 2027-01-14. Any other backwards step is left as-is, which the
+    order check in resolve_date_columns rejects. Headers that carry their own year (a real date
+    cell, '06-May-2026') are never shifted. Shared by ingestion and the reconciled export so both
+    date a sheet identically."""
     out, offset, prev_month = [], 0, None
     for i, h in enumerate(header):
         yearless = _yearless_day(h)
         if yearless and year:
             mon = yearless[0]
-            if prev_month is not None and mon < prev_month and mon + 12 - prev_month <= 2:
+            if (prev_month is not None and mon < prev_month
+                    and mon + 12 - prev_month <= MAX_ROLLOVER_GAP_MONTHS):
                 offset += 1
             prev_month = mon
             d = parse_day_header(h, year + offset)

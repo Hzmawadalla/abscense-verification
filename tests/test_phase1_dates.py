@@ -158,14 +158,43 @@ def test_uploads_spanning_attendance_periods_are_accepted(sheet, ref, headers, p
     assert len({attendance_period(c.work_date) for c in res.cells}) == periods
 
 
-def test_year_gap_of_more_than_two_months_is_rejected_not_misdated(sheet, ref):
-    """Reviewer M2: an Oct -> Jan sheet is not rolled over by date_columns (it only bridges a gap
-    of up to two months), so Jan resolves BEFORE Oct. Before Phase 1 that silently loaded January of
-    the same year; now it is rejected with a clear message. A contiguous 15th -> 14th export never
-    has such a gap."""
-    p = sheet(["CRM", "30-Oct", "05-Jan"], [["E-1", "Normal", "Normal"]])
+def test_sheet_longer_than_two_months_and_62_days_is_accepted(sheet, ref):
+    """No length limit: 15-Oct-2026 -> 14-Jan-2027 is 92 days over three attendance periods."""
+    hdr = ["15-Oct", "31-Oct", "15-Nov", "30-Nov", "15-Dec", "31-Dec", "01-Jan", "14-Jan"]
+    res = ingest_summary(sheet(["CRM", *hdr], [["E-1", *(["Normal"] * len(hdr))]]), ref, year=2026)
+    first, last = res.stats["date_range"]
+    assert (first, last) == (D(2026, 10, 15), D(2027, 1, 14)) and (last - first).days + 1 == 92
+    assert sorted({attendance_period(c.work_date) for c in res.cells}) == [
+        (D(2026, 10, 15), D(2026, 11, 14)), (D(2026, 11, 15), D(2026, 12, 14)),
+        (D(2026, 12, 15), D(2027, 1, 14))]
+
+
+def test_a_full_year_of_columns_rolls_over_once(sheet, ref):
+    hdr = [f"15-{m}" for m in ("Jul", "Aug", "Sep", "Oct", "Nov", "Dec", "Jan", "Feb", "Mar",
+                               "Apr", "May", "Jun")]
+    res = ingest_summary(sheet(["CRM", *hdr], [["E-1", *(["Normal"] * 12)]]), ref, year=2026)
+    assert res.stats["date_range"] == (D(2026, 7, 15), D(2027, 6, 15))
+    assert len({attendance_period(c.work_date) for c in res.cells}) == 12
+
+
+@pytest.mark.parametrize("hdr, jan_like", [
+    (["30-Oct", "05-Jan"], D(2027, 1, 5)),          # Nov/Dec columns missing: 3 months forward
+    (["20-Aug", "10-Jan"], D(2027, 1, 10)),         # 5 months forward: still a rollover
+])
+def test_a_gap_across_the_year_end_rolls_over(sheet, ref, hdr, jan_like):
+    res = ingest_summary(sheet(["CRM", *hdr], [["E-1", "Normal", "Normal"]]), ref, year=2026)
+    assert res.stats["date_range"][1] == jan_like
+    assert attendance_period(jan_like)[0] == D(2026, 12, 15)
+
+
+@pytest.mark.parametrize("hdr", [
+    ["06-May", "05-Apr"],        # out of order by a month (11 months 'forward'): never a rollover
+    ["15-Jul", "15-Jan"],        # 6 months: rollover or out of order? ambiguous -> rejected
+    ["10-Sep", "09-Sep"],        # same month, a day back
+])
+def test_ambiguous_or_out_of_order_sequences_are_rejected(sheet, ref, hdr):
     with pytest.raises(UnsafeWorkbookError, match="not in order"):
-        ingest_summary(p, ref, year=2026)
+        ingest_summary(sheet(["CRM", *hdr], [["E-1", "Normal", "Normal"]]), ref, year=2026)
 
 
 def test_repeated_crm_rows_count_toward_a_date_conflict(sheet, ref):
