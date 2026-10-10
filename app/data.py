@@ -436,6 +436,16 @@ def list_uploads(conn):
         return cur.fetchall()
 
 
+def uploads_with_hash(conn, file_sha256):
+    """Earlier uploads of the exact same file (Phase 1 duplicate-file warning)."""
+    if not file_sha256:
+        return []
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("select id, source_filename, created_at from attendance.ingestion_runs "
+                    "where file_sha256 = %s order by created_at", (file_sha256,))
+        return cur.fetchall()
+
+
 def _count_with_history(cur, where_sql, params=()):
     cur.execute(f"select count(*) from attendance.cases c where {where_sql} "
                 f"and {CASE_HAS_HISTORY}", params)
@@ -448,7 +458,10 @@ def remove_upload(conn, run_id) -> dict:
     Returns {'refused': n} without deleting anything when n case(s) carry an answer, evidence or
     audit history; otherwise deletes the cases (by ingestion_run_id) then the run (exceptions
     cascade) and returns {'cases_deleted': n}. The database backs this up: a case with
-    attachments or audit entries cannot be deleted (those foreign keys are RESTRICT)."""
+    attachments or audit entries cannot be deleted (those foreign keys are RESTRICT).
+
+    The upload's stored attendance cells (Phase 1) are removed with it: cells are the upload's
+    own source data, not TL/case history, so they never make an upload protected."""
     with conn.cursor() as cur:
         protected = _count_with_history(cur, "c.ingestion_run_id = %s", (run_id,))
         if protected:
@@ -457,6 +470,7 @@ def remove_upload(conn, run_id) -> dict:
         cur.execute("select count(*) from attendance.cases where ingestion_run_id = %s", (run_id,))
         total = cur.fetchone()[0]
         cur.execute("delete from attendance.cases where ingestion_run_id = %s", (run_id,))
+        cur.execute("delete from attendance.attendance_days where ingestion_run_id = %s", (run_id,))
         cur.execute("delete from attendance.ingestion_runs where id = %s", (run_id,))
     conn.commit()
     return {"cases_deleted": total}
@@ -476,6 +490,7 @@ def reset_all_cases(conn) -> dict:
         n = cur.fetchone()[0]
         cur.execute("delete from attendance.cases")
         cur.execute("delete from attendance.ingestion_exceptions")
+        cur.execute("delete from attendance.attendance_days")
         cur.execute("delete from attendance.ingestion_runs")
     conn.commit()
     return {"cases_deleted": n}

@@ -6,6 +6,8 @@ production adapter wraps a psycopg connection. All statements are schema-qualifi
 - cases upsert on (employee, work_date) WITHOUT resetting an in-flight verification,
 - a re-upload that changes an existing case's source status is audited first, so the value it
   replaces is never lost,
+- every cell of the sheet (flagged or not, blanks included) is stored per upload in
+  attendance_days (Phase 1); the newest upload per CRM + date is the active source,
 - exceptions are recorded per ingestion run."""
 from dataclasses import dataclass
 from typing import Protocol
@@ -92,9 +94,23 @@ values (%s, %s, %s, %s, %s)
 
 INSERT_RUN = """
 insert into attendance.ingestion_runs
-  (source_filename, range_start, range_end, triggered_by, created_count, skipped_count, exception_count)
-values (%s, %s, %s, %s, %s, %s, %s)
+  (source_filename, range_start, range_end, triggered_by, created_count, skipped_count, exception_count,
+   file_sha256, full_cells)
+values (%s, %s, %s, %s, %s, %s, %s, %s, %s)
 returning id
+"""
+
+# Phase 1: one row per cell of this upload. employee / TL resolve by canonical CRM, like cases;
+# an unknown CRM keeps its cell with employee_id null (never shown to a TL).
+INSERT_DAY = """
+insert into attendance.attendance_days
+  (ingestion_run_id, crm, crm_key, employee_id, manager_id_at_ingest, work_date, raw_value, bucket,
+   canonical_status, is_half_day, source_row)
+values
+  (%s, %s, %s,
+   (select id from attendance.employees where crm = %s),
+   (select id from attendance.managers where crm = %s),
+   %s, %s, %s, %s, %s, %s)
 """
 
 
@@ -109,6 +125,11 @@ def employee_params(e):
 
 def case_params(c, run_id):
     return (c.employee_crm, c.manager_crm, c.work_date, c.source_status, c.is_half_day, run_id)
+
+
+def day_params(cell, run_id):
+    return (run_id, cell.crm, cell.crm_key, cell.crm, cell.manager_crm, cell.work_date,
+            cell.raw_value, cell.bucket, cell.canonical_status, cell.is_half_day, cell.source_row)
 
 
 def source_change_params(c, run_id, actor):
@@ -133,20 +154,26 @@ def load_reference(db: DB, reference) -> None:
 
 
 def load_ingestion(db: DB, result, reference=None, source_filename=None, range_start=None,
-                   range_end=None, triggered_by=None) -> LoadSummary:
-    """Record the run, upsert cases, and persist exceptions linked to the run.
+                   range_end=None, triggered_by=None, file_sha256=None) -> LoadSummary:
+    """Record the run, upsert cases, persist exceptions, then store every cell of the sheet.
 
     Reference-level exceptions (unmapped employees, missing TLs — the 'fix Structure' worklist)
-    are persisted alongside the per-day ingestion exceptions so HRBP sees the full picture."""
+    are persisted alongside the per-day ingestion exceptions so HRBP sees the full picture.
+    The date range defaults to the sheet's own first/last date column."""
     ref_excs = reference.exceptions if reference is not None else []
     total_exc = len(result.exceptions) + len(ref_excs)
+    cells = getattr(result, "cells", None) or []
+    sheet_range = result.stats.get("date_range") if result.stats else None
+    if sheet_range and range_start is None and range_end is None:
+        range_start, range_end = sheet_range
     run_id = db.one(INSERT_RUN, (source_filename, range_start, range_end, triggered_by,
-                                 len(result.cases), 0, total_exc))[0]
+                                 len(result.cases), 0, total_exc, file_sha256, bool(cells)))[0]
     actor = f"ingest:{triggered_by or 'system'}"
     db.many(AUDIT_SOURCE_CHANGE, [source_change_params(c, run_id, actor) for c in result.cases])
     db.many(UPSERT_CASE, [case_params(c, run_id) for c in result.cases])
     exc_rows = [(run_id, e.crm, e.work_date, e.raw_value, e.reason) for e in result.exceptions]
     exc_rows += [(run_id, e.crm, None, e.detail, e.reason) for e in ref_excs]
     db.many(INSERT_EXCEPTION, exc_rows)
+    db.many(INSERT_DAY, [day_params(cell, run_id) for cell in cells])
     return LoadSummary(run_id=run_id, managers=0, employees=0,
                        cases=len(result.cases), exceptions=total_exc)

@@ -23,7 +23,7 @@ psycopg = pytest.importorskip("psycopg")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS = sorted((REPO_ROOT / "supabase" / "migrations").glob("*.sql"))
-TABLES = ("audit_log", "case_attachments", "cases", "notifications", "ingestion_exceptions",
+TABLES = ("attendance_days", "audit_log", "case_attachments", "cases", "notifications", "ingestion_exceptions",
           "ingestion_runs", "employees", "managers")
 
 
