@@ -156,3 +156,22 @@ def test_uploads_spanning_attendance_periods_are_accepted(sheet, ref, headers, p
     p = sheet(["CRM", *headers], [["E-1", *(["Normal"] * len(headers))]])
     res = ingest_summary(p, ref, year=2026)
     assert len({attendance_period(c.work_date) for c in res.cells}) == periods
+
+
+def test_year_gap_of_more_than_two_months_is_rejected_not_misdated(sheet, ref):
+    """Reviewer M2: an Oct -> Jan sheet is not rolled over by date_columns (it only bridges a gap
+    of up to two months), so Jan resolves BEFORE Oct. Before Phase 1 that silently loaded January of
+    the same year; now it is rejected with a clear message. A contiguous 15th -> 14th export never
+    has such a gap."""
+    p = sheet(["CRM", "30-Oct", "05-Jan"], [["E-1", "Normal", "Normal"]])
+    with pytest.raises(UnsafeWorkbookError, match="not in order"):
+        ingest_summary(p, ref, year=2026)
+
+
+def test_repeated_crm_rows_count_toward_a_date_conflict(sheet, ref):
+    """Reviewer M1, kept on purpose: a repeated date column must agree on EVERY data row, including
+    a repeated CRM row that first-row-wins later ignores. Ambiguous source data is rejected rather
+    than partly trusted (fail safe; nothing is written)."""
+    p = sheet(["CRM", "07-May", "07-May"], [["E-1", "Normal", "Normal"], ["E-1", "Absent", None]])
+    with pytest.raises(UnsafeWorkbookError):
+        ingest_summary(p, ref, year=2026)
