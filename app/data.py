@@ -5,6 +5,7 @@ import json
 from psycopg.rows import dict_row
 
 from app import security
+from app.tl_labels import tl_status_label, tl_verdict_label
 
 
 # --------------------------------------------------------------------------- audit
@@ -97,17 +98,42 @@ def rotate_manager_link(conn, manager_id) -> str:
 
 
 # --------------------------------------------------------------------------- cases (TL side)
-def open_cases_for_manager(conn, manager_id):
+# Everything the TL page may receive per case. Raw source text, leave type and other people's
+# comments never leave this module for a TL (privacy policy: app.tl_labels).
+TL_CASE_FIELDS = ("id", "work_date", "is_half_day", "status", "employee_name", "employee_crm",
+                  "status_label", "verdict_label", "own_comment")
+
+
+def tl_actor(manager) -> str:
+    """The audit actor a TL's own submissions are recorded under."""
+    return f"tl:{manager['crm']}"
+
+
+def tl_cases_for_manager(conn, manager):
+    """The TL page's cases, TL-safe: approved labels only (app.tl_labels), and a comment only when
+    THIS TL wrote it (the case's latest tl_verdict audit entry is theirs) — a case that changed hands
+    never shows the previous TL's note. `manager` is the row from manager_by_token."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "select c.id, c.work_date, c.source_status, c.is_half_day, c.status, "
-            "       c.manager_status, c.leave_type, c.manager_comment, "
-            "       e.name as employee_name, e.crm as employee_crm "
+            "       c.manager_status, c.manager_comment, "
+            "       e.name as employee_name, e.crm as employee_crm, "
+            "       (select l.actor from attendance.audit_log l "
+            "         where l.case_id = c.id and l.action = 'tl_verdict' "
+            "         order by l.created_at desc limit 1) as verdict_actor "
             "from attendance.cases c join attendance.employees e on e.id = c.employee_id "
             "where c.manager_id = %s and c.status in ('open','manager_responded') "
             "order by e.name, c.work_date",
-            (manager_id,))
-        return cur.fetchall()
+            (manager["id"],))
+        rows = cur.fetchall()
+    me = tl_actor(manager)
+    return [{"id": r["id"], "work_date": r["work_date"], "is_half_day": r["is_half_day"],
+             "status": r["status"], "employee_name": r["employee_name"],
+             "employee_crm": r["employee_crm"],
+             "status_label": tl_status_label(r["source_status"], flagged=True),
+             "verdict_label": tl_verdict_label(r["manager_status"]),
+             "own_comment": r["manager_comment"] if r["verdict_actor"] == me else None}
+            for r in rows]
 
 
 def submit_verdict(conn, case_id, manager_status, leave_type, comment, actor) -> bool:
