@@ -10,9 +10,10 @@ import re
 from dataclasses import dataclass, field
 
 import openpyxl
+from openpyxl.utils import get_column_letter
 
 from .reference import _clean, _is_junk_crm, _key
-from .status_rules import classify
+from .status_rules import classify, normalize
 from .workbook import norm_header, resolve_sheet
 
 _MONTHS = {m: i for i, m in enumerate(
@@ -82,6 +83,58 @@ def date_columns(header, year):
         if d is not None:
             out.append((i, d))
     return out
+
+
+class UnsafeWorkbookError(ValueError):
+    """The workbook's dates cannot be resolved safely, so NOTHING may be ingested from it.
+
+    Raised by the parser, before any database write; the message is safe to show HRBP (dates and
+    column letters only, never cell contents)."""
+
+
+def _cell_key(v) -> str:
+    """A cell's comparable value for repeated-date checks: normalized text, '' for blank."""
+    return "" if v is None or str(v).strip() == "" else normalize(v)
+
+
+def resolve_date_columns(day_cols, data_rows, crm_idx):
+    """Make the date columns unambiguous before anything is stored.
+
+    Several columns resolving to one work date: if every employee row holds the same normalized
+    value in all of them (blank vs non-blank counts as different), the FIRST column is kept and the
+    date is reported as a duplicate; if any row differs, the upload is rejected. After that the
+    kept dates must strictly increase left to right — a step backwards means the year or the
+    rollover was resolved wrongly (e.g. a real 31-Dec cell followed by a year-less '1-Jan'), so it
+    is rejected rather than guessed. Spanning several attendance periods is fine.
+
+    Returns (kept [(column_index, date)], duplicates [(date, [column_index, ...])])."""
+    by_date = {}
+    for i, d in day_cols:
+        by_date.setdefault(d, []).append(i)
+    rows = [r for r in data_rows
+            if crm_idx < len(r) and not _is_junk_crm(_clean(r[crm_idx]))
+            and _clean(r[crm_idx])]
+    duplicates, conflicts = [], []
+    for d, cols in by_date.items():
+        if len(cols) < 2:
+            continue
+        same = all(len({_cell_key(r[i] if i < len(r) else None) for i in cols}) == 1 for r in rows)
+        (duplicates if same else conflicts).append((d, cols))
+    letters = lambda cols: ", ".join(get_column_letter(i + 1) for i in cols)  # noqa: E731
+    if conflicts:
+        detail = "; ".join(f"{d:%d-%b-%Y} in columns {letters(c)}" for d, c in conflicts)
+        raise UnsafeWorkbookError(
+            f"the same date appears in more than one column with different values ({detail}). "
+            "Nothing was loaded — fix the sheet so each date has one column, then upload again.")
+    kept = [(i, d) for i, d in day_cols if by_date[d][0] == i]
+    for (pi, pd), (ci, cd) in zip(kept, kept[1:]):
+        if cd <= pd:
+            raise UnsafeWorkbookError(
+                f"the dates are not in order: column {get_column_letter(ci + 1)} resolves to "
+                f"{cd:%d-%b-%Y}, after column {get_column_letter(pi + 1)} = {pd:%d-%b-%Y}. "
+                "Check the Year (it is the year of the FIRST date column) and the date headers. "
+                "Nothing was loaded.")
+    return kept, duplicates
 
 
 @dataclass
@@ -158,8 +211,13 @@ def ingest_summary(path, reference, year, sheet="Summary Report", header_row=3):
     day_cols = date_columns(header, year)
     if not day_cols:
         raise ValueError("no date columns parsed — check the year / header_row")
+    day_cols, dup_dates = resolve_date_columns(day_cols, rows[1:], crm_idx)
 
     result = IngestionResult()
+    for d, cols in dup_dates:
+        result.exceptions.append(IngestionException(
+            None, d, f"date repeated in columns {', '.join(get_column_letter(i + 1) for i in cols)} "
+                     "with identical values; the first column was used", "duplicate_date_column"))
     buckets = {"skip": 0, "not_verified": 0, "trigger": 0, "ignore": 0, "unknown": 0}
 
     first_row = {}                # crm_key -> sheet row of its first occurrence
@@ -169,28 +227,26 @@ def ingest_summary(path, reference, year, sheet="Summary Report", header_row=3):
             continue
         key = _key(crm)
         emp = emp_by_key.get(key)
-        # Complete storage: the FIRST row of a CRM is its attendance (as in the reconciled export);
-        # a repeated row is logged, and its cells are not stored. Case creation below is unchanged.
-        is_first = key not in first_row
-        if is_first:
-            first_row[key] = sheet_row
-        else:
+        # First row wins, for stored cells AND cases (as in the reconciled export): a repeated row
+        # of a CRM is only logged, so the active source and the case text can never disagree.
+        if key in first_row:
             result.exceptions.append(IngestionException(
                 crm, day_cols[0][1], f"duplicate row {sheet_row} (first at row {first_row[key]})",
                 "duplicate_row"))
+            continue
+        first_row[key] = sheet_row
         for i, day in day_cols:
             val = r[i] if i < len(r) else None
             blank = val is None or str(val).strip() == ""
-            if is_first:
-                if blank:
-                    cell_bucket, cell_canon, cell_hd = "blank", None, False
-                else:
-                    cell_bucket, cell_canon, cell_hd = classify(str(val).strip())
-                result.cells.append(AttendanceCell(
-                    crm=emp.crm if emp else crm, crm_key=key, work_date=day,
-                    raw_value=None if blank else str(val).strip(), bucket=cell_bucket,
-                    canonical_status=cell_canon, is_half_day=cell_hd,
-                    manager_crm=emp.manager_crm if emp else None, source_row=sheet_row))
+            if blank:
+                cell_bucket, cell_canon, cell_hd = "blank", None, False
+            else:
+                cell_bucket, cell_canon, cell_hd = classify(str(val).strip())
+            result.cells.append(AttendanceCell(
+                crm=emp.crm if emp else crm, crm_key=key, work_date=day,
+                raw_value=None if blank else str(val).strip(), bucket=cell_bucket,
+                canonical_status=cell_canon, is_half_day=cell_hd,
+                manager_crm=emp.manager_crm if emp else None, source_row=sheet_row))
             if blank:
                 continue
             raw = str(val).strip()
@@ -221,5 +277,6 @@ def ingest_summary(path, reference, year, sheet="Summary Report", header_row=3):
         "days_by_bucket": buckets,
         "cells": len(result.cells),
         "date_range": (min(dates), max(dates)),
+        "duplicate_dates": [d for d, _ in dup_dates],
     }
     return result

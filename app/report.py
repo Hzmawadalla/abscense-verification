@@ -81,7 +81,10 @@ def _matrix_index(ws, year):
         raise ValueError("no 'CRM' column found in the attendance matrix")
     # same dating as ingestion (incl. the December -> January rollover), so a cross-year sheet
     # maps back to the very cells ingestion created cases from
-    date_cols = {d: j + 1 for j, d in date_columns(header_vals, year)}
+    # first column wins for a repeated date, exactly like ingestion (resolve_date_columns)
+    date_cols = {}
+    for j, d in date_columns(header_vals, year):
+        date_cols.setdefault(d, j + 1)
     if not date_cols:
         raise ValueError(f"no date columns found for year {year} in the attendance matrix")
     # first row wins, so a duplicated CRM maps to the same cell ingestion verified

@@ -133,15 +133,15 @@ def test_every_cell_is_represented_with_its_bucket(tmp_path, sample_workbook_wit
     assert res.stats["date_range"] == (D(2026, 5, 6), D(2026, 5, 10))
 
 
-def test_duplicate_row_first_wins_logged_and_cases_unchanged(tmp_path, sample_workbook_with_summary):
+def test_duplicate_row_first_wins_for_cells_and_cases(tmp_path, sample_workbook_with_summary):
     ref = parse_reference(sample_workbook_with_summary)
     path = _sheet(tmp_path, ["CRM", "06-May"], [["E-1", "Normal"], ["e-1", "Absent"]])
     res = ingest_summary(path, ref, year=2026)
     assert [(c.raw_value, c.source_row) for c in res.cells] == [("Normal", 4)]   # first row
     dup = [e for e in res.exceptions if e.reason == "duplicate_row"]
     assert len(dup) == 1 and "first at row 4" in dup[0].raw_value
-    # case creation is exactly as before: the duplicate row's Absent still creates its case
-    assert [(c.employee_crm, c.source_status) for c in res.cases] == [("E-1", "Absent")]
+    # first row wins for cases too (L1): the repeated row's Absent creates no case
+    assert res.cases == []
 
 
 def test_existing_case_output_is_unchanged_by_cell_storage(sample_workbook_with_summary):
