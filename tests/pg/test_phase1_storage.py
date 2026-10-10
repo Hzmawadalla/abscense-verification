@@ -302,7 +302,7 @@ def test_case_only_employee_visible_only_on_case_days(conn, org):
     g = _grid(tl_period_attendance(conn, org["TL-A"], P))
     other_day = g[("E-3", d1)]
     assert other_day["visibility"] == "case_only"
-    assert other_day["status"] is None and other_day["bucket"] is None    # withheld
+    assert other_day["status"] is None and other_day["flagged"] is False   # withheld
     assert other_day["coverage"] == "none" and other_day["case_id"] is None
     case_day = g[("E-3", d2)]
     assert case_day["status"] == "Absent" and case_day["pending"] and case_day["case_id"]
@@ -358,3 +358,24 @@ def test_tl_contract_is_fail_closed_on_every_bucket_path(conn, org):
         assert word not in text
     hrbp = _grid(hrbp_period_attendance(conn, P))
     assert hrbp[("E-1", P)]["raw_value"] == "Hospital visit - check"            # HRBP exact
+
+
+def test_another_tls_case_outcome_never_reaches_a_team_member_row(conn, org):
+    """Review finding: E-1 is on TL-A's team now, but the d1 case was TL-B's (before a team move).
+    TL-A must not see TL-B's case, answer, override or pending state; TL-B keeps it."""
+    d1 = P
+    _load(conn, [_cell("E-1", d1, "Absent", "trigger")],
+          cases=[CaseCandidate("E-1", "TL-A", d1, "Absent")])
+    cid = _q(conn, "select id from attendance.cases")[0]["id"]
+    _q(conn, "update attendance.cases set manager_id = %s where id = %s", (org["TL-B"], cid))
+    assert data.submit_verdict(conn, cid, "present", None, "tl-b note", "tl:TL-B")
+    assert data.close_case(conn, cid, "hrbp:x", final_status="sick_leave", comment="note")
+    a = _grid(tl_period_attendance(conn, org["TL-A"], P))[("E-1", d1)]
+    assert a["visibility"] == "team" and a["status"] == "Absent"         # own team's cell
+    assert (a["case_id"], a["case_status"], a["tl_answer"], a["tl_answered_at"],
+            a["hrbp_override_value"], a["hrbp_overridden"], a["pending"],
+            a["source_changed_since_response"]) == (None, None, None, None, None, False, False, False)
+    b = _grid(tl_period_attendance(conn, org["TL-B"], P))[("E-1", d1)]
+    assert b["visibility"] == "case_only" and b["case_id"] == cid
+    assert b["tl_answer"] == "Present" and b["hrbp_override_value"] == "Leave"
+    assert all("bucket" not in r for r in tl_period_attendance(conn, org["TL-A"], P))

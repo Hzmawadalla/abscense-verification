@@ -101,13 +101,13 @@ def hrbp_period_attendance(conn, period_start, manager_id=None):
 
 # Exactly what a TL row carries, in order (the TL data-contract whitelist; tests assert it).
 TL_ROW_FIELDS = ("employee_id", "employee_crm", "employee_name", "work_date", "period_start",
-                 "period_end", "bucket", "is_half_day", "coverage", "flagged", "pending", "case_id",
+                 "period_end", "is_half_day", "coverage", "flagged", "pending", "case_id",
                  "case_status", "tl_answered_at", "hrbp_overridden", "source_changed_since_response",
                  "employment", "status", "tl_answer", "hrbp_override_value", "visibility")
 
 # A "case-only" employee (on another TL's team, included only because a case is assigned to this TL
 # in the period) is visible ONLY on those case days; every other day of theirs is withheld.
-_WITHHELD = {"status": None, "bucket": None, "is_half_day": False, "coverage": "none",
+_WITHHELD = {"status": None, "is_half_day": False, "coverage": "none",
              "flagged": False, "pending": False, "case_id": None, "case_status": None,
              "tl_answer": None, "tl_answered_at": None, "hrbp_overridden": False,
              "hrbp_override_value": None, "source_changed_since_response": False,
@@ -126,6 +126,19 @@ def _tl_status(r):
     return None
 
 
+# Case-derived inputs of a grid row (see _GRID_SQL); cleared when the case belongs to another TL.
+_CASE_INPUTS = {"case_id": None, "case_status": None, "case_manager_id": None,
+                "case_source_status": None, "case_is_half_day": None, "tl_answer": None,
+                "tl_answered_at": None, "final_status": None, "closed_by": None,
+                "hrbp_override_at": None, "hrbp_override_by": None, "hrbp_override_note": None,
+                "audit_change_after_response": False}
+
+
+def _without_case(r):
+    """The row as if no case existed on that day (a new dict; `r` is not modified)."""
+    return {**r, **_CASE_INPUTS}
+
+
 def tl_period_attendance(conn, manager_id, period_start):
     """The TL's team x every day of the 15th -> 14th period, TL-safe.
 
@@ -133,11 +146,15 @@ def tl_period_attendance(conn, manager_id, period_start):
 
     Team = employees currently assigned to this TL (`visibility = "team"`, every day), plus
     employees with a case assigned to this TL in the period (`visibility = "case_only"`, ONLY those
-    case days — all their other days are withheld). Every row carries exactly TL_ROW_FIELDS:
+    case days — all their other days are withheld). A case assigned to ANOTHER TL (e.g. from before
+    an employee changed team) is never shown: its answer, override and pending state are dropped.
+    No workbook bucket is exposed. Every row carries exactly TL_ROW_FIELDS:
     `status`, `tl_answer` and `hrbp_override_value` are app.tl_labels labels; raw cell text, HRBP
     note/actor, comments and evidence are never returned."""
     out = []
     for r in hrbp_period_attendance(conn, period_start, manager_id=manager_id):
+        if r["case_id"] and r["case_manager_id"] != manager_id:
+            r = _derive(_without_case(r))       # another TL's case: its outcome is not ours
         row = dict(r)
         row["status"] = _tl_status(r)
         row["tl_answer"] = tl_verdict_label(r["tl_answer"])
