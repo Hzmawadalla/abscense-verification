@@ -9,6 +9,7 @@ On Streamlit Community Cloud, set SUPABASE_DB_URL (and cookie secrets) in the ap
 """
 # Deploy marker: 2026-07-12 — force Community Cloud to rebuild onto the Line-Manager mapping.
 import io
+import logging
 import os
 
 import streamlit as st
@@ -20,6 +21,7 @@ from app.report import build_links_workbook, reconcile
 from app.attachments import (EXPORT_EXPIRES_IN, evidence_columns, filter_by_crm,
                              group_by_case)
 from app.storage import StorageClient, object_path, validate_upload
+from app.tl_labels import tl_case_line, tl_done_line
 from app.verdicts import (HRBP_OVERRIDE_VERDICTS, PROOF_REQUIRED, VERDICT_LABEL, VERDICTS,
                           blocked_cases, is_blocked, unanswered, verdict_choices)
 from app.version import build_stamp
@@ -153,7 +155,7 @@ def render_tl(token: str):
     if still_open:
         st.warning(still_open)
 
-    cases = data.open_cases_for_manager(c, mgr["id"])
+    cases = data.tl_cases_for_manager(c, mgr)    # TL-safe rows: approved labels only
     pending = [cs for cs in cases if cs["status"] == "open"]        # not yet validated — editable
     done = [cs for cs in cases if cs["status"] == "manager_responded"]  # validated once — locked
     if not cases:
@@ -175,9 +177,7 @@ def render_tl(token: str):
         # widgets on the run where "Submit all" is pressed.
         choices, gate = {}, {}
         for cs in pending:
-            hd = " · ½ day" if cs["is_half_day"] else ""
-            st.markdown(f"**{cs['employee_name']}** · `{cs['employee_crm']}` — {cs['work_date']} · "
-                        f"flagged as *{cs['source_status']}*{hd}")
+            st.markdown(tl_case_line(cs))
             col1, col2 = st.columns([1, 2])
             verdict = col1.selectbox("Verdict", verdict_choices(), key=f"v{cs['id']}")
             comment = col2.text_input("Comment (optional)", key=f"c{cs['id']}")
@@ -193,7 +193,7 @@ def render_tl(token: str):
             st.divider()
 
         if st.button("Submit all", type="primary"):
-            actor = f"tl:{mgr['crm']}"
+            actor = data.tl_actor(mgr)
             # Gate first, write second. A Present verdict without a CRM screenshot behind it is
             # never submitted, so the case stays 'open' and the TL can attach proof and resubmit
             # on this same link. dict (not set) to keep the blocked order stable.
@@ -215,7 +215,11 @@ def render_tl(token: str):
                         if ms in PROOF_REQUIRED:
                             blocked[cid] = None  # unproven Present — leave it open
                             continue
-                        st.warning(f"Attachment for one case failed: {e}")
+                        # Never show the raw error to a TL; the detail goes to the server log.
+                        logging.getLogger(__name__).warning("TL attachment failed for case %s: %s",
+                                                            cid, e)
+                        st.warning("The attachment for one case could not be saved. Your answer "
+                                   "was still recorded; contact HR if they need the file.")
                 if not data.submit_verdict(c, cid, ms, None, cm, actor):
                     stale += 1  # already validated or closed since the page loaded
                     continue
@@ -257,13 +261,7 @@ def render_tl(token: str):
         st.subheader("✓ Already submitted (locked)")
         st.caption("These are locked to one submission each — contact HR if a correction is needed.")
         for cs in done:
-            hd = " · ½ day" if cs["is_half_day"] else ""
-            verdict = VERDICT_LABEL.get(cs["manager_status"], cs["manager_status"] or "—")
-            line = (f"**{cs['employee_name']}** · `{cs['employee_crm']}` — {cs['work_date']} · "
-                    f"flagged *{cs['source_status']}*{hd} → **{verdict}**")
-            if cs["manager_comment"]:
-                line += f" · _{cs['manager_comment']}_"
-            st.markdown(line)
+            st.markdown(tl_done_line(cs))
 
 
 # ============================================================ HRBP LAYER (login)
