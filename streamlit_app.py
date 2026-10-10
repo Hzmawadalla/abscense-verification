@@ -15,7 +15,7 @@ import os
 
 import streamlit as st
 
-from app import data
+from app import data, ingest_flow
 from app.dingtalk import DingTalkClient
 from app.mailer import SMTPMailer
 from app.report import build_links_workbook, reconcile
@@ -26,11 +26,9 @@ from app.tl_labels import tl_case_line, tl_done_line
 from app.verdicts import (HRBP_OVERRIDE_VERDICTS, PROOF_REQUIRED, VERDICT_LABEL, VERDICTS,
                           blocked_cases, is_blocked, unanswered, verdict_choices)
 from app.version import build_stamp
-from ingestion import loader
 from ingestion.config import load_aliases, load_dingtalk_ids
-from ingestion.db_psycopg import PsycopgDB
 from ingestion.reference import parse_reference_any
-from ingestion.summary import ingest_summary
+from ingestion.summary import UnsafeWorkbookError, ingest_summary
 
 st.set_page_config(page_title="Attendance Verification", page_icon="🗓️", layout="wide")
 
@@ -425,8 +423,24 @@ def render_hrbp():
                                   type=["xlsx"], key="ref_wb")
         att_up = st.file_uploader("Attendance report — Summary Report tab (.xlsx)",
                                   type=["xlsx"], key="att_wb")
-        year = st.number_input("Year for the date columns", 2024, 2100, 2026, help="Year of the FIRST date column; a 15-Dec → 14-Jan sheet rolls into the next year automatically.")
-        if st.button("Parse & load", type="primary"):
+        year = st.number_input(
+            "Year of the FIRST date column", 2024, 2100, 2026,
+            help="The year of the left-most date column. A 15-Dec → 14-Jan sheet rolls into the next "
+                 "year automatically — enter the December year. You will see the resolved dates "
+                 "before anything is loaded.")
+        st.caption("Step 1: **Parse** (nothing is saved) → Step 2: check the resolved dates → "
+                   "Step 3: **Confirm & load**.")
+        ref_bytes = ref_up.getvalue() if ref_up else None
+        att_bytes = (att_up or ref_up).getvalue() if (att_up or ref_up) else None
+        current_key = ingest_flow.preview_key(ref_bytes, att_bytes, year)
+        pending = st.session_state.get("ingest_preview")
+        if pending and pending["key"] != current_key:      # file or year changed: stale preview
+            st.session_state.pop("ingest_preview", None)
+            pending = None
+
+        if st.button("Parse", type="primary"):
+            st.session_state.pop("ingest_preview", None)
+            pending = None
             if not (ref_up or att_up):
                 st.warning("Upload at least one workbook.")
                 st.stop()
@@ -450,28 +464,45 @@ def render_hrbp():
                 st.stop()
             try:
                 res = ingest_summary(att_path, ref, year=int(year))
+            except UnsafeWorkbookError as e:
+                st.error(f"This attendance workbook can't be loaded safely: {e}")
+                st.stop()
             except (KeyError, ValueError) as e:
                 st.error(f"The attendance workbook can't be parsed ({e}). It must contain a "
                          "**Summary Report** sheet (from the attendance tool).")
                 st.stop()
-
             att_sha = hashlib.sha256(att_src.getvalue()).hexdigest()
-            earlier = data.uploads_with_hash(c, att_sha)
-            if earlier:   # allowed: the new upload becomes the active source, values unchanged
-                st.warning(f"This exact file was already uploaded {len(earlier)} time(s) (first "
-                           f"{earlier[0]['created_at']:%Y-%m-%d %H:%M}). Loading it again makes it "
-                           "the newest source; its values are the same.")
-            first_day, last_day = res.stats["date_range"]
-            with c.transaction():  # atomic; commits on success WITHOUT closing the pooled
-                db = PsycopgDB(c)   # connection (psycopg3's `with conn:` would close it)
-                loader.load_reference(db, ref)
-                summary = loader.load_ingestion(db, res, reference=ref, source_filename=att_src.name,
-                                                triggered_by=actor, range_start=first_day,
-                                                range_end=last_day, file_sha256=att_sha)
-            applied = data.set_dingtalk_ids(c, load_dingtalk_ids())
-            st.success(f"Loaded {summary.cases} cases, {summary.exceptions} exceptions "
-                       f"({ref.stats['mapped_employees']}/{ref.stats['employees']} employees mapped)."
-                       + (f" Applied {applied} DingTalk id(s)." if applied else ""))
+            pending = {"key": current_key, "ref": ref, "res": res, "name": att_src.name,
+                       "sha": att_sha,
+                       "preview": ingest_flow.build_preview(res, ref,
+                                                            data.uploads_with_hash(c, att_sha))}
+            st.session_state["ingest_preview"] = pending
+
+        if pending:
+            st.subheader("Check before loading")
+            st.markdown("\n".join(f"- {line}"
+                                  for line in ingest_flow.preview_lines(pending["preview"])))
+            st.info(f"The Year was entered as **{int(year)}** = the year of the first date column. "
+                    "If the dates above are wrong, change the Year (this preview clears) and parse again.")
+            col_ok, col_cancel = st.columns(2)
+            if col_ok.button("Confirm & load", type="primary"):
+                st.session_state.pop("ingest_preview", None)
+                try:
+                    summary = ingest_flow.load_confirmed(c, pending["ref"], pending["res"],
+                                                         pending["name"], actor, pending["sha"])
+                except Exception as e:  # noqa: BLE001 — the transaction rolled back; say so
+                    logging.getLogger(__name__).exception("ingestion load failed")
+                    st.error(f"Nothing was loaded — the database rejected the upload "
+                             f"({type(e).__name__}). Please try again or contact support.")
+                    st.stop()
+                applied = data.set_dingtalk_ids(c, load_dingtalk_ids())
+                ref = pending["ref"]
+                st.success(f"Loaded {summary.cases} cases, {summary.exceptions} exceptions "
+                           f"({ref.stats['mapped_employees']}/{ref.stats['employees']} employees mapped)."
+                           + (f" Applied {applied} DingTalk id(s)." if applied else ""))
+            if col_cancel.button("Discard"):
+                st.session_state.pop("ingest_preview", None)
+                st.rerun()
 
     with tab_exc:
         exc = data.list_exceptions(c, resolved=False)
