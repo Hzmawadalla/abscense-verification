@@ -82,6 +82,11 @@ def _apply(conn, plan):
     return apply_backfill(conn, plan, plan.file_sha256)
 
 
+def _x(conn, sql, params=()):
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+
+
 def _q(conn, sql, params=()):
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, params)
@@ -361,3 +366,100 @@ def test_apply_writes_only_the_approved_bytes(conn, legacy, tmp_path):
     conn.commit()
     assert _cells(conn, legacy["run_id"]) == 9
     assert _run_row(conn, legacy["run_id"])["file_sha256"] == approved
+
+
+# ------------------------------------------------------------------ M1: both directions + dates
+def test_refuses_a_larger_workbook_with_unsupported_flagged_dates(conn, legacy, tmp_path):
+    rows = [r + ["Absent", "Normal"] for r in ROWS]                 # 09-May flagged for everyone
+    path = _workbook(tmp_path / legacy["path"].name, rows=rows,
+                     headers=HEADERS + ("09-May", "10-May"))
+    _expect_refusal(conn, legacy, path, match="no matching case or exception")
+
+
+def test_refuses_an_extra_flagged_entry_inside_the_range(conn, legacy, tmp_path):
+    rows = [list(r) for r in ROWS]
+    rows[1][1] = "Absent"                         # E-2 06-May flagged: no case, no exception
+    path = _workbook(tmp_path / legacy["path"].name, rows=rows)
+    _expect_refusal(conn, legacy, path, match="1 flagged cell")
+
+
+def test_refuses_a_half_day_mismatch(conn, legacy):
+    _x(conn, "update attendance.cases set is_half_day = false where id = %s",
+       (legacy["cases"][("E-2", D(2026, 5, 7))],))
+    conn.commit()
+    _expect_refusal(conn, legacy, legacy["path"], match="do not match")
+
+
+def test_refuses_dates_after_the_upload_date(conn, legacy):
+    _x(conn, "update attendance.ingestion_runs set created_at = '2026-05-07 12:00+03' "
+             "where id = %s", (legacy["run_id"],))
+    conn.commit()
+    _expect_refusal(conn, legacy, legacy["path"], match="later than the upload's own date")
+
+
+def test_upload_date_uses_the_business_time_zone(conn, legacy):
+    # 2026-05-07 22:30 UTC is already 2026-05-08 in Cairo (UTC+3 in May): 08-May is not a future date
+    _x(conn, "update attendance.ingestion_runs set created_at = '2026-05-07 22:30+00' "
+             "where id = %s", (legacy["run_id"],))
+    conn.commit()
+    assert _plan(conn, legacy["run_id"], legacy["path"]).cases_checked == 2
+
+
+def test_valid_workbook_with_unflagged_days_outside_the_evidence_span(conn, tmp_path):
+    rows = [["E-1", "Normal", "Absent", "Normal", "Normal", "Normal"],
+            ["E-2", "Normal", "Normal", "No Show", "Normal", "Normal"]]
+    path = _workbook(tmp_path / "wide.xlsx", rows=rows,
+                     headers=("05-May", "06-May", "07-May", "08-May", "09-May"))
+    run_id = _legacy_upload(conn, path)
+    plan = _plan(conn, run_id, path)
+    assert plan.cases_checked == 2 and len(plan.cells) == 10
+    assert plan.dates_outside_evidence == [D(2026, 5, 5), D(2026, 5, 8), D(2026, 5, 9)]
+
+
+def test_exception_backed_flagged_cells_are_counted(conn, legacy):
+    plan = _plan(conn, legacy["run_id"], legacy["path"])
+    assert plan.exceptions_matched == 1                                # E-UNKNOWN 06-May
+
+
+def _overlap_setup(conn, tmp_path, audited):
+    """An EARLIER upload creates E-1 06-May; the TARGET upload re-flags it (same text, so no new
+    case) and creates E-2 07-May itself. `audited` first records one source change so that source
+    auditing is provably on before both uploads."""
+    if audited:
+        _legacy_upload(conn, _workbook(tmp_path / "a0.xlsx", rows=[["E-1", "Absent"]],
+                                       headers=("01-May",)))
+        _legacy_upload(conn, _workbook(tmp_path / "a1.xlsx", rows=[["E-1", "No Show"]],
+                                       headers=("01-May",)))           # audited source change
+    _legacy_upload(conn, _workbook(tmp_path / "earlier.xlsx", rows=[["E-1", "Absent"]],
+                                   headers=("06-May",)))
+    target = _workbook(tmp_path / "target.xlsx",
+                       rows=[["E-1", "Absent", "Normal"], ["E-2", "Normal", "No Show"]],
+                       headers=("06-May", "07-May"))
+    return _legacy_upload(conn, target), target
+
+
+def test_overlap_with_an_earlier_case_passes_when_history_is_proven(conn, tmp_path):
+    run_id, target = _overlap_setup(conn, tmp_path, audited=True)
+    assert _q(conn, "select count(*) as n from attendance.cases where ingestion_run_id = %s",
+              (run_id,))[0]["n"] == 1
+    plan = _plan(conn, run_id, target)
+    assert plan.cases_checked == 1 and plan.overlaps_supported == 1
+
+
+def test_overlap_without_audit_history_is_refused_with_zero_writes(conn, tmp_path):
+    run_id, target = _overlap_setup(conn, tmp_path, audited=False)
+    before = _q(conn, "select count(*) as n from attendance.attendance_days")[0]["n"]
+    with pytest.raises(BackfillRefused, match="cannot be proven"):
+        _plan(conn, run_id, target)
+    conn.rollback()
+    assert _q(conn, "select count(*) as n from attendance.attendance_days")[0]["n"] == before
+    assert not _run_row(conn, run_id)["full_cells"]
+
+
+def test_overlap_with_a_different_earlier_text_is_refused(conn, tmp_path):
+    run_id, _ = _overlap_setup(conn, tmp_path, audited=True)
+    edited = _workbook(tmp_path / "target.xlsx",
+                       rows=[["E-1", "No Show", "Normal"], ["E-2", "Normal", "No Show"]],
+                       headers=("06-May", "07-May"))
+    with pytest.raises(BackfillRefused, match="no matching case or exception"):
+        _plan(conn, run_id, edited)
