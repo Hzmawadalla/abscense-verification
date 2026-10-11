@@ -585,3 +585,45 @@ def test_cli_dry_run_reports_evidence_without_personal_data(conn, legacy, pg_dsn
     assert lines[1] == ("evidence: 1 flagged cell(s) matched to this upload's exceptions, 0 to "
                         "earlier uploads' cases; dates outside the case/exception span (unflagged, "
                         "reported not refused): 2026-05-08")
+
+
+# ------------------------------------------------------------------ M1: text "at the time" from the audit
+def _audit_on(conn, tmp_path):
+    _legacy_upload(conn, _workbook(tmp_path / "a0.xlsx", rows=[["E-2", "Absent"]], headers=("01-May",)))
+    _legacy_upload(conn, _workbook(tmp_path / "a1.xlsx", rows=[["E-2", "No Show"]], headers=("01-May",)))
+
+
+def _target(conn, tmp_path, e1_text):
+    path = _workbook(tmp_path / "target.xlsx",
+                     rows=[["E-1", e1_text, "Normal"], ["E-2", "Normal", "No Show"]],
+                     headers=("06-May", "07-May"))
+    return _legacy_upload(conn, path), path
+
+
+def test_overlap_uses_the_text_before_a_later_change(conn, tmp_path):
+    """Earlier case 'Absent'; the target upload agreed; a LATER upload changed it to 'No Show'.
+    At the target's time the case said 'Absent' (the first audited change's old value)."""
+    _audit_on(conn, tmp_path)
+    _legacy_upload(conn, _workbook(tmp_path / "earlier.xlsx", rows=[["E-1", "Absent"]],
+                                   headers=("06-May",)))
+    run_id, path = _target(conn, tmp_path, "Absent")
+    _legacy_upload(conn, _workbook(tmp_path / "later.xlsx", rows=[["E-1", "No Show"]],
+                                   headers=("06-May",)))                # audited change after T
+    assert _plan(conn, run_id, path).overlaps_supported == 1
+
+
+def test_overlap_uses_the_text_after_an_earlier_change(conn, tmp_path):
+    """Earlier case 'Absent', changed to 'No Show' BEFORE the target upload: the target's sheet
+    must say 'No Show' (the latest audited change at or before its time)."""
+    _audit_on(conn, tmp_path)
+    _legacy_upload(conn, _workbook(tmp_path / "earlier.xlsx", rows=[["E-1", "Absent"]],
+                                   headers=("06-May",)))
+    _legacy_upload(conn, _workbook(tmp_path / "middle.xlsx", rows=[["E-1", "No Show"]],
+                                   headers=("06-May",)))                # audited change before T
+    run_id, path = _target(conn, tmp_path, "No Show")
+    assert _plan(conn, run_id, path).overlaps_supported == 1
+    stale = _workbook(tmp_path / "target.xlsx",
+                      rows=[["E-1", "Absent", "Normal"], ["E-2", "Normal", "No Show"]],
+                      headers=("06-May", "07-May"))                     # the pre-change text
+    with pytest.raises(BackfillRefused, match="no matching case or exception"):
+        _plan(conn, run_id, stale)
