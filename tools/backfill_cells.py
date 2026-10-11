@@ -12,14 +12,14 @@ BEGIN READ ONLY ... ROLLBACK. It prints counts only — never names, CRMs or cel
 (so exactly the reviewed file is written). The connection string is read from the environment only.
 """
 import argparse
-import hashlib
 import os
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-from ingestion.backfill import BackfillRefused, apply_backfill, plan_backfill  # noqa: E402
+from ingestion.backfill import (BackfillRefused, apply_backfill, plan_backfill,  # noqa: E402
+                                sha256_of)
 
 
 def _connect(dsn):
@@ -29,7 +29,8 @@ def _connect(dsn):
 
 def run(dsn, run_id, path, year, apply=False, expect_sha256=None, out=print) -> int:
     path = Path(path)
-    sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    data = path.read_bytes()            # read ONCE: hash, parse and written cells all use these bytes
+    sha = sha256_of(data)
     if apply and expect_sha256 != sha:
         out("REFUSED: --apply needs --expect-sha256 equal to this file's sha256 "
             "(run the dry run first). Nothing was written.")
@@ -40,7 +41,7 @@ def run(dsn, run_id, path, year, apply=False, expect_sha256=None, out=print) -> 
             conn.execute("set default_transaction_read_only = on")
             conn.execute("begin read only")
         try:
-            plan = plan_backfill(conn, run_id, path, year)
+            plan = plan_backfill(conn, run_id, data, path.name, year)
         except BackfillRefused as e:
             out(f"REFUSED: {e}. Nothing was written.")
             return 2
@@ -54,7 +55,7 @@ def run(dsn, run_id, path, year, apply=False, expect_sha256=None, out=print) -> 
             out("DRY RUN — nothing was written.")
             return 0
         try:
-            written = apply_backfill(conn, plan)
+            written = apply_backfill(conn, plan, expect_sha256)
         except BackfillRefused as e:
             out(f"REFUSED: {e}. Nothing was written.")
             return 2

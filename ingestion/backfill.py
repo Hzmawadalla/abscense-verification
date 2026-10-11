@@ -12,6 +12,11 @@ comments, timestamps, attachments, HRBP overrides, exceptions or the audit log. 
 run's ORIGINAL created_at, so active-source precedence (newest upload wins per CRM + date) is
 exactly what it would have been had the cells been stored at the time.
 
+Approval is bound to BYTES: the workbook is read once by the caller, and the hash, the parse and the
+written cells all come from those same bytes. apply_backfill re-derives everything from the plan's
+bytes, refuses unless their hash equals the approved one, and re-runs every check under a row lock,
+so neither a swapped file nor a stale or edited plan can be written.
+
 Proof that the workbook is the upload's file (all must hold):
   1. the run exists, has no cells and full_cells = false (no rerun, no partial state);
   2. the workbook file name equals the run's recorded source_filename (necessary, not sufficient);
@@ -24,8 +29,8 @@ manager_id_at_ingest stays NULL: the reference data used at the time was not kep
 team assignment is not the historical one. employee_id is resolved by CRM (case-insensitive).
 """
 import hashlib
+import io
 from dataclasses import dataclass, field
-from pathlib import Path
 from types import SimpleNamespace
 
 from psycopg.rows import dict_row
@@ -40,6 +45,9 @@ class BackfillRefused(Exception):
 @dataclass
 class BackfillPlan:
     run_id: object
+    filename: str
+    year: int
+    data: bytes = field(repr=False)
     file_sha256: str
     range_start: object
     range_end: object
@@ -91,37 +99,35 @@ update attendance.ingestion_runs
 """
 
 
-def _parse(path, year):
-    """The live parser, with no reference data: cells only (no employee/TL mapping, no cases)."""
-    res = ingest_summary(str(path), SimpleNamespace(employees=[]), year=year)
+def sha256_of(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _parse(data: bytes, year):
+    """The live parser on the given bytes, with no reference data: cells only."""
+    try:
+        res = ingest_summary(io.BytesIO(data), SimpleNamespace(employees=[]), year=year)
+    except (ValueError, KeyError) as e:          # incl. UnsafeWorkbookError, missing sheet
+        raise BackfillRefused(f"the workbook cannot be parsed safely: {e}") from e
     return res.cells, res.stats["date_range"]
 
 
-def plan_backfill(conn, run_id, path, year) -> BackfillPlan:
-    """Read-only. Every check that decides whether the workbook may be attached; raises
-    BackfillRefused (writing nothing) on any doubt. UnsafeWorkbookError from the parser is
-    turned into a refusal too."""
-    path = Path(path)
-    with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(_RUN_SQL, (run_id,))
-        run = cur.fetchone()
-        if run is None:
-            raise BackfillRefused("no upload with that id")
-        if run["full_cells"] or run["cells"]:
-            raise BackfillRefused("this upload already has attendance cells (no rerun)")
-        if (run["source_filename"] or "") != path.name:
-            raise BackfillRefused("the workbook file name does not match the upload's recorded file "
-                                  "name")
-        cur.execute(_RUN_CASES_SQL, (run_id,))
-        cases = cur.fetchall()
+def _validate(cur, run_id, filename, cells):
+    """Every check against the database, on an open cursor. Returns the number of cases checked."""
+    cur.execute(_RUN_SQL, (run_id,))
+    run = cur.fetchone()
+    if run is None:
+        raise BackfillRefused("no upload with that id")
+    if run["full_cells"] or run["cells"]:
+        raise BackfillRefused("this upload already has attendance cells (no rerun)")
+    if (run["source_filename"] or "") != filename:
+        raise BackfillRefused("the workbook file name does not match the upload's recorded file "
+                              "name")
+    cur.execute(_RUN_CASES_SQL, (run_id,))
+    cases = cur.fetchall()
     if not cases:
         raise BackfillRefused("this upload created no cases, so the workbook cannot be verified "
                               "against it")
-    try:
-        cells, (first, last) = _parse(path, year)
-    except ValueError as e:                       # incl. UnsafeWorkbookError
-        raise BackfillRefused(f"the workbook cannot be parsed safely: {e}") from e
-
     by_key = {(c.crm_key, c.work_date): c for c in cells}
     mismatched = 0
     for case in cases:
@@ -132,28 +138,42 @@ def plan_backfill(conn, run_id, path, year) -> BackfillPlan:
     if mismatched:
         raise BackfillRefused(f"{mismatched} of {len(cases)} case(s) created by this upload do not "
                               "match the workbook (wrong file, wrong Year, or edited workbook)")
-    return BackfillPlan(run_id=run["id"], file_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                        range_start=first, range_end=last, cells=cells, cases_checked=len(cases),
-                        distinct_crms=len({c.crm_key for c in cells}),
+    return len(cases)
+
+
+def plan_backfill(conn, run_id, data: bytes, filename: str, year) -> BackfillPlan:
+    """Read-only. `data` is the workbook's bytes, read ONCE by the caller; the hash, the parse and
+    (later) the written cells all come from them. Raises BackfillRefused on any doubt."""
+    cells, (first, last) = _parse(data, year)
+    with conn.cursor(row_factory=dict_row) as cur:
+        checked = _validate(cur, run_id, filename, cells)
+    return BackfillPlan(run_id=run_id, filename=filename, year=year, data=data,
+                        file_sha256=sha256_of(data), range_start=first, range_end=last, cells=cells,
+                        cases_checked=checked, distinct_crms=len({c.crm_key for c in cells}),
                         distinct_dates=len({c.work_date for c in cells}))
 
 
-def apply_backfill(conn, plan: BackfillPlan) -> int:
-    """Write the plan atomically: the run row is locked and re-checked inside the transaction, then
-    every cell is inserted and the run marked. Returns the number of cells written."""
+def apply_backfill(conn, plan: BackfillPlan, expect_sha256: str) -> int:
+    """Write atomically. Refuses unless the plan's BYTES hash to the approved `expect_sha256`; then,
+    inside one transaction holding the run row lock, re-parses those bytes and re-runs every check
+    before inserting the re-parsed cells (plan.cells is never trusted for the write)."""
+    if not expect_sha256 or sha256_of(plan.data) != expect_sha256:
+        raise BackfillRefused("the workbook bytes do not match the approved sha256")
+    cells, (first, last) = _parse(plan.data, plan.year)
     with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute("select full_cells, (select count(*) from attendance.attendance_days d "
-                        " where d.ingestion_run_id = r.id) from attendance.ingestion_runs r "
-                        "where r.id = %s for update", (plan.run_id,))
-            row = cur.fetchone()
-            if row is None or row[0] or row[1]:
-                raise BackfillRefused("the upload changed since it was checked (cells present)")
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("select id from attendance.ingestion_runs where id = %s for update",
+                        (plan.run_id,))
+            if cur.fetchone() is None:
+                raise BackfillRefused("no upload with that id")
+            try:
+                _validate(cur, plan.run_id, plan.filename, cells)
+            except BackfillRefused as e:
+                raise BackfillRefused(f"re-check under lock failed: {e}") from e
             cur.executemany(INSERT_BACKFILL_DAY, [
                 (plan.run_id, c.crm, c.crm_key, c.crm_key, c.work_date, c.raw_value, c.bucket,
-                 c.canonical_status, c.is_half_day, c.source_row) for c in plan.cells])
-            cur.execute(_MARK_RUN_SQL, (plan.file_sha256, plan.range_start, plan.range_end,
-                                        plan.run_id))
+                 c.canonical_status, c.is_half_day, c.source_row) for c in cells])
+            cur.execute(_MARK_RUN_SQL, (expect_sha256, first, last, plan.run_id))
             if cur.rowcount != 1:
                 raise BackfillRefused("the upload could not be marked as complete")
-    return len(plan.cells)
+    return len(cells)

@@ -1,5 +1,6 @@
 """Legacy cell backfill against real PostgreSQL: cells are attached to the EXISTING upload, every
 refusal writes nothing, and no verification/history data changes — ever."""
+import dataclasses
 import datetime
 import hashlib
 import importlib.util
@@ -72,6 +73,15 @@ def _phase1_upload(conn, path):
                                      triggered_by="hrbp:new", file_sha256="x").run_id
 
 
+def _plan(conn, run_id, path, year=2026):
+    path = Path(path)
+    return plan_backfill(conn, run_id, path.read_bytes(), path.name, year)
+
+
+def _apply(conn, plan):
+    return apply_backfill(conn, plan, plan.file_sha256)
+
+
 def _q(conn, sql, params=()):
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, params)
@@ -126,9 +136,9 @@ def test_backfill_attaches_cells_to_the_existing_upload_and_changes_nothing_else
     runs_before = _q(conn, "select count(*) as n from attendance.ingestion_runs")[0]["n"]
     before = _snapshot(conn, run_id)
 
-    plan = plan_backfill(conn, run_id, legacy["path"], 2026)
+    plan = _plan(conn, run_id, legacy["path"], 2026)
     assert plan.cases_checked == 2 and (plan.distinct_crms, plan.distinct_dates) == (3, 3)
-    assert apply_backfill(conn, plan) == 9
+    assert _apply(conn, plan) == 9
     conn.commit()
 
     assert _snapshot(conn, run_id) == before                  # no history touched, row for row
@@ -145,7 +155,7 @@ def test_backfill_attaches_cells_to_the_existing_upload_and_changes_nothing_else
 
 
 def test_backfilled_period_shows_cells_and_missing_days_stay_missing(conn, legacy):
-    apply_backfill(conn, plan_backfill(conn, legacy["run_id"], legacy["path"], 2026))
+    _apply(conn, _plan(conn, legacy["run_id"], legacy["path"], 2026))
     conn.commit()
     tl_a = _q(conn, "select id from attendance.managers where crm = 'TL-A'")[0]["id"]
     g = {(r["employee_crm"], r["work_date"]): r for r in tl_period_attendance(conn, tl_a, PERIOD)}
@@ -160,7 +170,7 @@ def test_newer_upload_stays_active_on_overlapping_dates(conn, legacy, tmp_path):
     newer = _workbook(tmp_path / "newer.xlsx", rows=[["E-1", "Late", "Late"]],
                       headers=("07-May", "08-May"))
     new_run = _phase1_upload(conn, newer)
-    apply_backfill(conn, plan_backfill(conn, legacy["run_id"], legacy["path"], 2026))
+    _apply(conn, _plan(conn, legacy["run_id"], legacy["path"], 2026))
     conn.commit()
     active = {r["work_date"]: (r["ingestion_run_id"], r["raw_value"]) for r in _q(
         conn, "select work_date, ingestion_run_id, raw_value from attendance.v_active_days "
@@ -178,7 +188,7 @@ def test_original_text_is_taken_from_the_audit_when_a_later_upload_changed_the_c
     case = _q(conn, "select source_status from attendance.cases where id = %s",
               (legacy["cases"][("E-2", D(2026, 5, 7))],))[0]
     assert case["source_status"] == "Absent"
-    plan = plan_backfill(conn, legacy["run_id"], legacy["path"], 2026)   # still verifies
+    plan = _plan(conn, legacy["run_id"], legacy["path"], 2026)   # still verifies
     assert plan.cases_checked == 2
 
 
@@ -189,7 +199,7 @@ def _expect_refusal(conn, legacy, path, run_id=None, year=2026, match=""):
     run_before = _run_row(conn, legacy["run_id"])
     cells_before = _q(conn, "select count(*) as n from attendance.attendance_days")[0]["n"]
     with pytest.raises(BackfillRefused, match=match):
-        plan_backfill(conn, run_id, path, year)
+        _plan(conn, run_id, path, year)
     conn.rollback()
     assert _snapshot(conn, legacy["run_id"]) == before
     assert _run_row(conn, legacy["run_id"]) == run_before
@@ -244,26 +254,26 @@ def test_refuses_an_upload_that_already_has_cells(conn, legacy, tmp_path):
 
 
 def test_rerun_is_refused_and_writes_nothing(conn, legacy):
-    plan = plan_backfill(conn, legacy["run_id"], legacy["path"], 2026)
-    apply_backfill(conn, plan)
+    plan = _plan(conn, legacy["run_id"], legacy["path"], 2026)
+    _apply(conn, plan)
     conn.commit()
     after_first = _snapshot(conn, legacy["run_id"])
     cells = _cells(conn, legacy["run_id"])
     with pytest.raises(BackfillRefused, match="already has"):
-        plan_backfill(conn, legacy["run_id"], legacy["path"], 2026)
-    with pytest.raises(BackfillRefused, match="changed since"):
-        apply_backfill(conn, plan)                            # a stale plan re-applied
+        _plan(conn, legacy["run_id"], legacy["path"], 2026)
+    with pytest.raises(BackfillRefused, match="re-check under lock failed"):
+        _apply(conn, plan)                            # a stale plan re-applied
     conn.rollback()
     assert _cells(conn, legacy["run_id"]) == cells and _snapshot(conn, legacy["run_id"]) == after_first
 
 
 def test_a_failure_mid_write_rolls_back_completely(conn, legacy, monkeypatch):
-    plan = plan_backfill(conn, legacy["run_id"], legacy["path"], 2026)
+    plan = _plan(conn, legacy["run_id"], legacy["path"], 2026)
     before, run_before = _snapshot(conn, legacy["run_id"]), _run_row(conn, legacy["run_id"])
     monkeypatch.setattr(backfill, "_MARK_RUN_SQL", backfill._MARK_RUN_SQL.replace(
         "ingestion_runs", "no_such_table"))                  # fails AFTER the cells were inserted
     with pytest.raises(Exception):
-        apply_backfill(conn, plan)
+        _apply(conn, plan)
     conn.rollback()
     assert _cells(conn, legacy["run_id"]) == 0
     assert _snapshot(conn, legacy["run_id"]) == before and _run_row(conn, legacy["run_id"]) == run_before
@@ -306,7 +316,7 @@ def test_tool_reports_refusals_and_needs_the_dsn_from_the_environment(conn, lega
     assert lines == ["REFUSED: the workbook file name does not match the upload's recorded file "
                      "name. Nothing was written."]
     sha = hashlib.sha256(legacy["path"].read_bytes()).hexdigest()
-    apply_backfill(conn, plan_backfill(conn, legacy["run_id"], legacy["path"], 2026))
+    _apply(conn, _plan(conn, legacy["run_id"], legacy["path"], 2026))
     conn.commit()
     lines.clear()
     assert backfill_cells.run(pg_dsn, legacy["run_id"], legacy["path"], 2026, apply=True,
@@ -315,3 +325,39 @@ def test_tool_reports_refusals_and_needs_the_dsn_from_the_environment(conn, lega
     monkeypatch.delenv("SUPABASE_DB_URL", raising=False)
     with pytest.raises(SystemExit, match="environment only"):
         backfill_cells.main([str(legacy["path"]), "--run-id", str(legacy["run_id"]), "--year", "2026"])
+
+
+
+# ------------------------------------------------------------------ M2: approval bound to bytes
+def test_tool_refuses_a_file_replaced_after_its_hash_was_approved(conn, legacy, pg_dsn):
+    from tools.backfill_cells import run
+    approved = hashlib.sha256(legacy["path"].read_bytes()).hexdigest()       # file A, reviewed
+    rows = [list(r) for r in ROWS]
+    rows[1][1] = "Late"                                                      # file B, same name
+    _workbook(legacy["path"], rows=rows)
+    lines = []
+    conn.commit()
+    assert run(pg_dsn, legacy["run_id"], legacy["path"], 2026, apply=True,
+               expect_sha256=approved, out=lines.append) == 2
+    assert "REFUSED" in lines[-1] and _cells(conn, legacy["run_id"]) == 0
+    assert not _run_row(conn, legacy["run_id"])["full_cells"]
+
+
+def test_apply_writes_only_the_approved_bytes(conn, legacy, tmp_path):
+    plan = _plan(conn, legacy["run_id"], legacy["path"])
+    approved = plan.file_sha256
+    other = _workbook(tmp_path / "other.xlsx", rows=[["E-1", "Absent", "Late", "Late"]])
+    with pytest.raises(BackfillRefused, match="approved sha256"):          # wrong approval
+        apply_backfill(conn, plan, hashlib.sha256(other.read_bytes()).hexdigest())
+    swapped = dataclasses.replace(plan, data=other.read_bytes())           # bytes swapped in plan
+    with pytest.raises(BackfillRefused, match="approved sha256"):
+        apply_backfill(conn, swapped, approved)
+    with pytest.raises(BackfillRefused, match="approved sha256"):
+        apply_backfill(conn, plan, "")
+    conn.rollback()
+    assert _cells(conn, legacy["run_id"]) == 0
+    edited = dataclasses.replace(plan, cells=plan.cells[:2])               # cells edited in plan
+    assert apply_backfill(conn, edited, approved) == 9                     # re-parsed, not trusted
+    conn.commit()
+    assert _cells(conn, legacy["run_id"]) == 9
+    assert _run_row(conn, legacy["run_id"])["file_sha256"] == approved
