@@ -463,3 +463,125 @@ def test_overlap_with_a_different_earlier_text_is_refused(conn, tmp_path):
                        headers=("06-May", "07-May"))
     with pytest.raises(BackfillRefused, match="no matching case or exception"):
         _plan(conn, run_id, edited)
+
+
+# ------------------------------------------------------------------ CLI hardening + transactions
+def test_dry_run_session_rejects_writes(conn, legacy, pg_dsn, monkeypatch):
+    import psycopg
+    from tools import backfill_cells
+    seen = []
+
+    def try_to_write(c, *args, **kwargs):
+        try:
+            c.execute("insert into attendance.notifications (channel) values ('email')")
+        except psycopg.errors.ReadOnlySqlTransaction:
+            seen.append("rejected")
+        raise BackfillRefused("probe finished")
+
+    monkeypatch.setattr(backfill_cells, "plan_backfill", try_to_write)
+    conn.commit()
+    lines = []
+    assert backfill_cells.run(pg_dsn, legacy["run_id"], legacy["path"], 2026, out=lines.append) == 2
+    assert seen == ["rejected"]
+    assert _q(conn, "select count(*) as n from attendance.notifications")[0]["n"] == 0
+
+
+def test_two_concurrent_applies_write_once(conn, legacy, pg_dsn):
+    import threading
+
+    import psycopg
+    plan = _plan(conn, legacy["run_id"], legacy["path"])
+    conn.commit()
+    barrier, results = threading.Barrier(2), []
+
+    def worker():
+        with psycopg.connect(pg_dsn) as c:
+            barrier.wait()
+            try:
+                results.append(apply_backfill(c, plan, plan.file_sha256))
+            except BackfillRefused as e:
+                results.append(str(e))
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert len(results) == 2
+    assert results.count(9) == 1
+    assert any(isinstance(r, str) and "re-check under lock failed" in r for r in results)
+    assert _cells(conn, legacy["run_id"]) == 9
+
+
+def test_cli_rejects_a_malformed_run_id_without_connecting(legacy):
+    from tools.backfill_cells import run
+    lines = []
+    assert run("postgresql://nobody@203.0.113.1:1/none", "not-a-uuid", legacy["path"], 2026,
+               out=lines.append) == 2
+    assert lines == ["REFUSED: --run-id is not a valid upload id. Nothing was written."]
+
+
+def test_cli_connection_failure_is_sanitized(legacy):
+    from tools.backfill_cells import run
+    lines = []
+    assert run("postgresql://secretuser:secretpass@127.0.0.1:1/db", legacy["run_id"],
+               legacy["path"], 2026, out=lines.append) == 3
+    text = "\n".join(lines)
+    assert text.startswith("ERROR: database error (") and "Nothing was written" in text
+    for leak in ("secretuser", "secretpass", "127.0.0.1", "postgresql://"):
+        assert leak not in text
+
+
+def test_cli_missing_file_is_reported_without_its_path(legacy, tmp_path):
+    from tools.backfill_cells import run
+    lines = []
+    missing = tmp_path / "private-folder" / "nope.xlsx"
+    assert run("postgresql://x@127.0.0.1:1/db", legacy["run_id"], missing, 2026,
+               out=lines.append) == 3
+    assert lines == ["ERROR: the workbook file could not be read (FileNotFoundError). "
+                     "Nothing was written."]
+
+
+def test_cli_expect_project_ref_guard(conn, legacy, pg_dsn):
+    from tools.backfill_cells import run
+    lines = []
+    conn.commit()
+    assert run(pg_dsn, legacy["run_id"], legacy["path"], 2026, out=lines.append,
+               expect_project_ref="twddavxodczywjshedqk") == 2
+    assert lines == ["REFUSED: the connection does not target the expected project. "
+                     "Nothing was written."]
+    assert run(pg_dsn, legacy["run_id"], legacy["path"], 2026, out=lines.append,
+               expect_project_ref="127.0.0.1") == 0                    # optional; local works
+    assert _cells(conn, legacy["run_id"]) == 0
+
+
+def test_cli_never_prints_a_traceback(monkeypatch, capsys, legacy):
+    from tools import backfill_cells
+
+    def boom(*a, **k):
+        raise RuntimeError("postgresql://user:pw@host/db exploded")
+
+    monkeypatch.setattr(backfill_cells, "run", boom)
+    monkeypatch.setenv("SUPABASE_DB_URL", "postgresql://user:pw@host/db")
+    with pytest.raises(SystemExit) as e:
+        backfill_cells.main([str(legacy["path"]), "--run-id", str(legacy["run_id"]),
+                             "--year", "2026"])
+    assert e.value.code == 3
+    out = capsys.readouterr()
+    assert "RuntimeError" in out.out and "postgresql://" not in out.out + out.err
+    assert "Traceback" not in out.out + out.err
+
+
+def test_cli_help_description_is_complete():
+    from tools.backfill_cells import DESCRIPTION
+    assert DESCRIPTION.endswith("ingestion/backfill.py for exactly what is and is not written).")
+
+
+def test_cli_dry_run_reports_evidence_without_personal_data(conn, legacy, pg_dsn):
+    from tools.backfill_cells import run
+    lines = []
+    conn.commit()
+    assert run(pg_dsn, legacy["run_id"], legacy["path"], 2026, out=lines.append) == 0
+    assert lines[1] == ("evidence: 1 flagged cell(s) matched to this upload's exceptions, 0 to "
+                        "earlier uploads' cases; dates outside the case/exception span (unflagged, "
+                        "reported not refused): 2026-05-08")
