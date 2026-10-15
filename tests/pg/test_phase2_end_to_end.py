@@ -149,6 +149,9 @@ def test_reconciled_export_reflects_effective_status_and_marks_pending(conn, flo
     assert matrix["E-1"] == ("Present", "Sick Leave", "Normal", None)    # blank stays blank
     assert matrix["E-2"] == ("Absent", "Annual Leave", "Pending", "Normal")
     assert matrix["E-GHOST"] == ("Normal",) * 4
+    if "Staff not in Attendance" in wb.sheetnames:                     # D4 stays off that sheet
+        assert "E-GHOST" not in {r[0] for r in wb["Staff not in Attendance"].iter_rows(
+            values_only=True)}
     assert (result.overwritten, result.pending_marked, result.pending_not_marked,
             result.blank_cells, result.not_in_workbook) == (3, 1, 1, 1, 0)
 

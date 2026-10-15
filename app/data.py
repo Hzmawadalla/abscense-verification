@@ -295,7 +295,11 @@ def close_case(conn, case_id, actor, final_status=None, final_leave_type=None, c
 
     An override records its value, the HRBP actor, the time and the reason in the hrbp_override_*
     columns. The TL's verdict, comment and answer time are never modified, and the audit snapshot
-    keeps them together with any previous override, so repeated overrides stay traceable."""
+    keeps them together with any previous override, so repeated overrides stay traceable.
+
+    An unsupported override value raises ValueError before anything is read or written."""
+    if final_status:
+        effective.validate_override(final_status)       # server-side: never trust the dropdown
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute("select status, manager_status, leave_type, manager_comment, "
                     "manager_responded_at, final_status, final_leave_type, closed_by, "
@@ -305,7 +309,6 @@ def close_case(conn, case_id, actor, final_status=None, final_leave_type=None, c
         if old is None:  # allow overriding an already-closed (TL-finalized) case
             return False
         if final_status:
-            effective.validate_override(final_status)   # server-side: never trust the dropdown
             cur.execute(
                 "update attendance.cases set status = 'closed', final_status = %s, "
                 "final_leave_type = %s, closed_by = 'hrbp', closed_at = now(), "
@@ -330,18 +333,34 @@ def close_case(conn, case_id, actor, final_status=None, final_leave_type=None, c
     return True
 
 
-def close_open_month(conn, actor) -> int:
-    """Period close: stand every remaining open case as Absent (SPEC §6.5)."""
+# An open case whose day the newest upload no longer flags (a non-trigger cell, blank included).
+# Expects alias `c`; matches app.effective's REVIEW_REQUIRED.
+CASE_UNFLAGGED_NOW = (
+    "exists (select 1 from attendance.v_active_days a "
+    "        join attendance.employees e on lower(e.crm) = a.crm_key "
+    "        where e.id = c.employee_id and a.work_date = c.work_date and a.bucket <> 'trigger')")
+
+
+def close_open_month(conn, actor) -> dict:
+    """Period close: stand every remaining open case as Absent (SPEC §6.5) — EXCEPT a case whose
+    day the newest upload no longer flags (Phase 2): that one stays open for an HRBP decision, so a
+    day the source now calls Normal (or leaves blank) is never closed as Absent by default.
+
+    Returns {'closed': n, 'kept_for_review': n}."""
     with conn.cursor() as cur:
         cur.execute(
-            "update attendance.cases set status = 'closed', final_status = 'absent', "
+            "update attendance.cases c set status = 'closed', final_status = 'absent', "
             "closed_by = 'hrbp_cutoff', closed_at = now() "
-            "where status in ('open','manager_responded') returning id")
+            f"where c.status in ('open','manager_responded') and not {CASE_UNFLAGGED_NOW} "
+            "returning c.id")
         ids = [r[0] for r in cur.fetchall()]
         for cid in ids:
             _audit(cur, cid, actor, "auto_close_absent", None, {"final_status": "absent"})
+        cur.execute("select count(*) from attendance.cases c "
+                    f"where c.status in ('open','manager_responded') and {CASE_UNFLAGGED_NOW}")
+        kept = cur.fetchone()[0]
     conn.commit()
-    return len(ids)
+    return {"closed": len(ids), "kept_for_review": kept}
 
 
 # D4 (ingestion.summary.UNMAPPED_NO_FLAGS): recorded per upload with work_date null so HRBP sees
@@ -350,13 +369,16 @@ def close_open_month(conn, actor) -> int:
 
 
 def list_unmapped_no_flags(conn):
-    """D4 exceptions still open, newest upload first (HRBP Exceptions tab)."""
+    """D4 exceptions still open, one per CRM (its newest upload), for the HRBP Exceptions tab.
+    A CRM that has since been added to HC/Structure (now an employee) is no longer listed."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute("select distinct on (x.crm) x.crm, x.raw_value as detail, "
                     "       r.source_filename, r.created_at as uploaded_at "
                     "from attendance.ingestion_exceptions x "
                     "join attendance.ingestion_runs r on r.id = x.ingestion_run_id "
                     "where x.reason = %s and x.resolved = false "
+                    "  and not exists (select 1 from attendance.employees e "
+                    "                   where lower(e.crm) = lower(x.crm)) "
                     "order by x.crm, r.created_at desc", (UNMAPPED_NO_FLAGS,))
         return cur.fetchall()
 

@@ -146,3 +146,22 @@ def test_grid_row_adapter_uses_the_grid_column_names():
          "hrbp_override_at": None, "bucket": "blank", "canonical_status": None,
          "raw_value": None, "source_changed_since_response": False}
     assert eff.for_grid_row(r).status == REVIEW_REQUIRED
+
+
+def test_period_closed_case_on_a_day_no_longer_flagged_still_needs_review():
+    e = effective_status(case_status="closed", final_status="absent", closed_by="hrbp_cutoff",
+                         active_bucket="skip", active_status="Normal")
+    assert (e.status, e.source, e.needs_review) == ("Absent", "hrbp_cutoff", True)
+
+
+def test_period_closed_case_still_flagged_needs_no_review():
+    e = effective_status(case_status="closed", final_status="absent", closed_by="hrbp_cutoff",
+                         active_bucket="trigger", active_status="Absent")
+    assert e.needs_review is False
+
+
+@pytest.mark.parametrize("bucket", ["unknown", "ignore"])
+def test_unrecognised_newer_text_fails_closed_to_review(bucket):
+    # a newer cell nobody can classify is not "still flagged": HRBP must look, never auto-Absent
+    assert effective_status(case_status="open", active_bucket=bucket,
+                            active_raw="???").status == REVIEW_REQUIRED

@@ -297,3 +297,49 @@ def test_unresolved_cases_feed_the_export_and_closed_ones_do_not(conn, org):
     assert [r["employee_crm"] for r in unresolved] == ["E-1"]
     assert [r["employee_crm"] for r in closed] == ["E-2"]
     assert set(unresolved[0]) >= {"employee_crm", "work_date", "source_status"}
+
+
+# ------------------------------------------------------------------ period close (review fix H1)
+def test_period_close_never_closes_a_no_longer_flagged_day_as_absent(conn, org):
+    _load(conn, [_cell("E-1", DAY, "Absent", "trigger"), _cell("E-2", DAY, "Absent", "trigger")],
+          [_flag("E-1", DAY), _flag("E-2", DAY)], name="a")
+    _load(conn, [_cell("E-2", DAY, None, "blank")], name="b")         # E-2's day now blank
+    res = data.close_open_month(conn, "hrbp:x")
+    assert res == {"closed": 1, "kept_for_review": 1}
+    e1, e2 = _case(conn, "E-1"), _case(conn, "E-2")
+    assert (e1["status"], e1["final_status"], e1["closed_by"]) == ("closed", "absent", "hrbp_cutoff")
+    assert (e2["status"], e2["final_status"]) == ("open", None)
+    assert _grid_row(conn, "E-2")["effective_status"] == REVIEW_REQUIRED
+    assert len(_audit(conn, e1["id"], "auto_close_absent")) == 1
+    assert _audit(conn, e2["id"], "auto_close_absent") == []
+
+
+def test_period_close_leaves_decided_cases_alone(conn, org):
+    _load(conn, [_cell("E-1", DAY, "Absent", "trigger")], [_flag("E-1", DAY)])
+    _answer(conn, _case(conn, "E-1")["id"], "present")
+    assert data.close_open_month(conn, "hrbp:x") == {"closed": 0, "kept_for_review": 0}
+    assert _case(conn, "E-1")["final_status"] == "present"
+
+
+# ------------------------------------------------------------------ D4 goes away once mapped
+def test_d4_entry_disappears_once_the_crm_is_an_employee(conn, org):
+    ghost = AttendanceCell(crm="E-GHOST", crm_key="e-ghost", work_date=DAY, raw_value="Normal",
+                           bucket="skip", canonical_status="Normal", is_half_day=False,
+                           manager_crm=None, source_row=9)
+    _load(conn, [ghost], exceptions=[IngestionException("E-GHOST", None, UNMAPPED_NO_FLAGS_DETAIL,
+                                                        UNMAPPED_NO_FLAGS)])
+    assert [r["crm"] for r in data.list_unmapped_no_flags(conn)] == ["E-GHOST"]
+    _q(conn, "insert into attendance.employees (crm, name, manager_id) values ('e-ghost', 'G', %s)",
+       (org["TL-A"],))
+    assert data.list_unmapped_no_flags(conn) == []
+
+
+# ------------------------------------------------------------------ uploads and un-flag history
+def test_unflag_history_protects_the_original_upload_not_the_newer_one(conn, org):
+    first, cid, clear = _flag_then_clear(conn)
+    clear()
+    newer = _q(conn, "select id from attendance.ingestion_runs where source_filename = 'b'")[0]["id"]
+    assert data.remove_upload(conn, first) == {"refused": 1}           # history is never deleted
+    assert data.remove_upload(conn, newer) == {"cases_deleted": 0}     # its own cells only
+    assert len(_audit(conn, cid, "source_unflagged")) == 1             # the history remains
+    assert _grid_row(conn, "E-1")["effective_status"] == PENDING       # flagged again

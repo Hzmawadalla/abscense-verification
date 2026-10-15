@@ -68,7 +68,10 @@ def effective_status(*, case_status=None, tl_answer=None, final_status=None, clo
     has_case = case_status is not None
     flagged_now = active_bucket is None or active_bucket == "trigger"
     unflagged_open = has_case and case_status == "open" and not flagged_now
-    review = bool(source_changed_since_response) or unflagged_open
+    # closed by the period close (no human decision) although the source no longer flags the day:
+    # the Absent it carries was a default, so HRBP must still look at it
+    cutoff_unflagged = has_case and closed_by == "hrbp_cutoff" and not flagged_now
+    review = bool(source_changed_since_response) or unflagged_open or cutoff_unflagged
 
     if has_case and hrbp_override_at is not None and final_status:
         return Effective(_label(final_status), SOURCE_OVERRIDE, review)

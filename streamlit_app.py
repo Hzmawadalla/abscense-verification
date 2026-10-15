@@ -304,8 +304,9 @@ def _show_reconcile_summary(result):
                    f"decided them yet. **{result.pending_marked}** Absent / No Show cell(s) now read "
                    "**Pending** (never Absent); the rest are listed in Changes with After = Pending.")
     if result.blank_cells:
-        st.warning(f"⚠️ **{result.blank_cells}** empty cell(s) in this file (CRM rows × date "
-                   "columns) — **Missing** attendance, left blank, not counted as Absent.")
+        st.info(f"ℹ️ **{result.blank_cells}** empty cell(s) in this file (CRM rows × date "
+                "columns) — left blank, never counted as Absent. Some are normal (before a join "
+                "date, after an exit); check any that should hold attendance.")
     if result.other_period and not (result.overwritten or result.skipped_not_absent
                                     or result.not_in_workbook or result.unresolved):
         st.warning("No closed case falls inside this file's dates — check the Year, or that this "
@@ -699,11 +700,16 @@ def render_hrbp():
     with tab_close:
         st.error("⚠️ **DANGER — this is NOT a 'save' or 'process' button.** It permanently closes "
                  "**every** open case as **Absent** and **cannot be undone**. Use it only at the very "
-                 "end of the cycle, once every case has been verified.")
+                 "end of the cycle, once every case has been verified. Cases whose day the newest "
+                 "upload no longer flags are left open for review.")
         typed = st.text_input("To confirm, type the word  CLOSE  in capitals:")
         if st.button("Close the period now", type="primary", disabled=(typed.strip() != "CLOSE")):
-            n = data.close_open_month(c, actor)
-            st.success(f"Closed {n} open case(s) as Absent.")
+            res = data.close_open_month(c, actor)
+            st.success(f"Closed {res['closed']} open case(s) as Absent.")
+            if res["kept_for_review"]:
+                st.warning(f"{res['kept_for_review']} open case(s) were NOT closed: the newest "
+                           "upload no longer flags their day. Decide them with an HRBP Override "
+                           "(Dashboard → (needs review)).")
 
     with tab_export:
         st.write("Re-upload this period's attendance workbook to get it back with every **closed** "
@@ -715,9 +721,11 @@ def render_hrbp():
         built = st.session_state.get("reconciled")
         if built and built["key"] != exp_key:          # file or year changed: stale report
             st.session_state.pop("reconciled", None)
+            st.session_state.pop("reconcile_ack", None)
             built = None
         if exp_up and st.button("Build reconciled report", type="primary"):
             st.session_state.pop("reconciled", None)
+            st.session_state.pop("reconcile_ack", None)   # every new report needs a fresh tick
             built = None
             closed = data.list_closed_cases(c)
             unresolved = data.list_unresolved_cases(c)
@@ -737,7 +745,9 @@ def render_hrbp():
         if built:
             result = built["result"]
             _show_reconcile_summary(result)
-            needs_ack = bool(result.unresolved or result.blank_cells or result.not_in_workbook)
+            st.caption("The report reflects the cases at the moment it was built — build it "
+                       "again after deciding more cases.")
+            needs_ack = bool(result.unresolved or result.not_in_workbook)   # blanks: info only
             ack = (not needs_ack) or st.checkbox(
                 "I have read the warnings above: Pending and Missing days are NOT absences and "
                 "must be resolved before payroll.", key="reconcile_ack")
