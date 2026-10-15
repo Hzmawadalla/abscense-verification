@@ -1,12 +1,22 @@
 """D4: a sheet CRM that HC/Structure doesn't know, with no flagged day, is reported — not silently
 dropped, and never turned into an absence or a case."""
+import importlib.util
+from pathlib import Path
+
 import openpyxl
 import pytest
 
 from app import ingest_flow
-from conftest import SUMMARY_HEADERS, SUMMARY_ROWS, _build_reference
 from ingestion.reference import parse_reference
 from ingestion.summary import UNMAPPED_NO_FLAGS, ingest_summary
+
+# By path, not `import conftest`: under a full run that name can resolve to tests/pg/conftest.py.
+_spec = importlib.util.spec_from_file_location("tests_conftest",
+                                               Path(__file__).resolve().parent / "conftest.py")
+_top = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_top)
+SUMMARY_HEADERS, SUMMARY_ROWS, _build_reference = (_top.SUMMARY_HEADERS, _top.SUMMARY_ROWS,
+                                                   _top._build_reference)
 
 EXTRA = [
     ["E-QUIET", 20, 0, "Normal", "Weekend", None],          # unknown, nothing flagged
