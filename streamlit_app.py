@@ -274,6 +274,19 @@ def hrbp_authenticator():
     return stauth.Authenticate(creds, "attendance_auth", cookie, cookie_expiry_days=1)
 
 
+def override_layers(r) -> list[str]:
+    """The four layers of one case for HRBP, as markdown bullets: Original, TL, Override, Effective."""
+    current = r["active_raw"] or ("blank" if r["active_bucket"] == "blank" else "—")
+    tl = VERDICT_LABEL.get(r["manager_status"], r["manager_status"] or "—")
+    override = (VERDICT_LABEL.get(r["final_status"], r["final_status"])
+                if r.get("hrbp_override_at") else "—")
+    return [f"- **Original:** {r['source_status'] or '—'} (current source: {current})",
+            f"- **TL response:** {tl} · TL comment: {r['manager_comment'] or '—'}",
+            f"- **HRBP override:** {override}",
+            f"- **Effective:** **{r['effective_status']}** (decided by {r['effective_source']})"
+            + (" · ⚠️ needs review: the source changed" if r["needs_review"] else "")]
+
+
 def _show_reconcile_summary(result):
     """What the export actually did: written vs kept vs missing, not just a case count."""
     st.success(f"**{result.overwritten}** cell(s) updated to the final verdict "
@@ -286,8 +299,15 @@ def _show_reconcile_summary(result):
                    "this file — listed in Changes as *not in workbook*.")
     if result.other_period:
         st.caption(f"{result.other_period} closed case(s) from other periods were left out.")
+    if result.unresolved:
+        st.warning(f"⚠️ **{result.unresolved}** unresolved case(s) in this period — nobody has "
+                   f"decided them yet. **{result.pending_marked}** Absent / No Show cell(s) now read "
+                   "**Pending** (never Absent); the rest are listed in Changes with After = Pending.")
+    if result.blank_cells:
+        st.warning(f"⚠️ **{result.blank_cells}** empty cell(s) in this file (CRM rows × date "
+                   "columns) — **Missing** attendance, left blank, not counted as Absent.")
     if result.other_period and not (result.overwritten or result.skipped_not_absent
-                                    or result.not_in_workbook):
+                                    or result.not_in_workbook or result.unresolved):
         st.warning("No closed case falls inside this file's dates — check the Year, or that this "
                    "is the right period's workbook.")
 
@@ -322,8 +342,16 @@ def render_hrbp():
         m[0].metric("Open", counts.get("open", 0))
         m[1].metric("Responded", counts.get("manager_responded", 0))
         m[2].metric("Closed", counts.get("closed", 0))
-        status_filter = st.selectbox("Show", ["manager_responded", "open", "closed", "(all)"])
-        rows = data.list_cases(c, status=None if status_filter == "(all)" else status_filter)
+        status_filter = st.selectbox("Show", ["manager_responded", "open", "closed", "(all)",
+                                              "(needs review)"])
+        listed = None if status_filter in ("(all)", "(needs review)") else status_filter
+        rows = data.list_cases(c, status=listed)
+        if status_filter == "(needs review)":
+            rows = [r for r in rows if r["needs_review"]]
+        review_n = sum(1 for r in rows if r["needs_review"])
+        if review_n:
+            st.warning(f"⚠️ {review_n} case(s) shown need HRBP review: a newer upload changed or no "
+                       "longer flags the day. Nothing was voided — decide them with an override.")
 
         # Search by CRM, never by name — names collide and re-spell; the CRM is the stable key.
         crm_q = st.text_input("Search by CRM", placeholder="e.g. EGLP-hamedem",
@@ -365,19 +393,32 @@ def render_hrbp():
                          "evidence": st.column_config.NumberColumn(
                              "Files", help="Screenshots attached by the TL."),
                          "employee_crm": st.column_config.TextColumn("CRM"),
+                         "source_status": st.column_config.TextColumn(
+                             "Original (flagged)", help="The cell text the case was created from."),
+                         "active_raw": st.column_config.TextColumn(
+                             "Current source", help="The newest upload's cell for this day."),
+                         "manager_status": st.column_config.TextColumn("TL response"),
+                         "final_status": st.column_config.TextColumn("Final (stored)"),
+                         "effective_status": st.column_config.TextColumn(
+                             "Effective", help="HRBP Override > TL Response > Original Attendance."),
+                         "effective_source": st.column_config.TextColumn("Decided by"),
+                         "needs_review": st.column_config.CheckboxColumn("Needs review"),
+                         "active_bucket": None, "active_status": None,
                      })
         st.caption("A case with more than one file links to the first — **Files** shows the total.")
 
         st.subheader("HRBP Override (optional)")
-        st.caption("TL verdicts finalize automatically — use this only to correct a specific case.")
-        finalized = data.list_cases(c, status="closed")
-        if finalized:
-            label = {f"{r['employee_name']} · {r['work_date']} · final: {r['final_status']}": r
-                     for r in finalized}
-            pick = st.selectbox("Finalized case", list(label))
+        st.caption("TL verdicts finalize automatically — use this to correct a case, or to decide "
+                   "one that is still Pending or needs review.")
+        overridable = data.list_cases(c)
+        if overridable:
+            label = {f"{r['employee_name']} · {r['employee_crm']} · {r['work_date']} · "
+                     f"effective: {r['effective_status']}"
+                     + (" · ⚠️ review" if r["needs_review"] else ""): r
+                     for r in overridable}
+            pick = st.selectbox("Case", list(label))
             r = label[pick]
-            st.write(f"Current final: **{r['final_status']}** · TL said *{r['manager_status'] or '—'}* · "
-                     f"TL comment: {r['manager_comment'] or '—'}")
+            st.markdown("\n".join(override_layers(r)))
             if r.get("hrbp_override_at"):
                 st.write(f"HRBP Override by **{r['hrbp_override_by']}** at "
                          f"{r['hrbp_override_at']:%Y-%m-%d %H:%M} — {r['hrbp_override_note'] or '—'}")
@@ -406,12 +447,16 @@ def render_hrbp():
                 if not ovc.strip():
                     st.error("Override requires a reason.")
                 else:
-                    data.close_case(c, r["id"], actor, final_status=HRBP_OVERRIDE_VERDICTS[ov],
-                                    comment=ovc)
-                    st.success("HRBP Override saved.")
-                    st.rerun()
+                    try:
+                        data.close_case(c, r["id"], actor,
+                                        final_status=HRBP_OVERRIDE_VERDICTS[ov], comment=ovc)
+                    except ValueError:
+                        st.error("That override value is not supported.")
+                    else:
+                        st.success("HRBP Override saved.")
+                        st.rerun()
         else:
-            st.caption("No finalized cases yet.")
+            st.caption("No cases yet.")
 
     with tab_ingest:
         st.write("Upload this period's workbooks to create verification cases. The **HC** and "
@@ -500,6 +545,10 @@ def render_hrbp():
                 st.success(f"Loaded {summary.cases} cases, {summary.exceptions} exceptions "
                            f"({ref.stats['mapped_employees']}/{ref.stats['employees']} employees mapped)."
                            + (f" Applied {applied} DingTalk id(s)." if applied else ""))
+                d4 = pending["preview"].get("unmapped_no_flags")
+                if d4:
+                    st.warning(f"{d4} CRM(s) in the sheet are not in HC/Structure and have no "
+                               "flagged day — see ⚠️ Exceptions. No absence was recorded for them.")
             if col_cancel.button("Discard"):
                 st.session_state.pop("ingest_preview", None)
                 st.rerun()
@@ -507,12 +556,21 @@ def render_hrbp():
     with tab_exc:
         exc = data.list_exceptions(c, resolved=False)
         actionable = [e for e in exc if e.get("work_date") is not None]  # attendance-day problems
-        gaps = len(exc) - len(actionable)                                 # HC/Structure gaps (no date)
+        d4_rows = data.list_unmapped_no_flags(c)
+        gaps = sum(1 for e in exc if e.get("work_date") is None
+                   and e.get("reason") != data.UNMAPPED_NO_FLAGS)   # HC/Structure gaps (no date)
         st.write(f"**{len(actionable)}** attendance exception(s) to work — the day-level worklist.")
         if gaps:
             st.caption(f"➕ {gaps} reference/'Staff not in Attendance' item(s) (no date) are excluded "
                        "here and exported on the **Staff not in Attendance** sheet in 📤 Export.")
         st.dataframe(actionable, use_container_width=True, hide_index=True)
+        if d4_rows:
+            st.subheader(f"Not in HC/Structure — no flagged day ({len(d4_rows)})")
+            st.caption("These CRMs appear in an attendance sheet but not in HC/Structure, and had no "
+                       "flagged day. **This is not an absence and not a missing cell**: their cells "
+                       "are stored, no case was created. Add them to HC/Structure if they should be "
+                       "verified.")
+            st.dataframe(d4_rows, use_container_width=True, hide_index=True)
 
     with tab_links:
         st.write("Generate each TL's unique link and send it — by **email**, DingTalk, or copy manually.")
@@ -653,23 +711,40 @@ def render_hrbp():
         exp_up = st.file_uploader("Attendance report — Summary Report tab (.xlsx)",
                                   type=["xlsx"], key="exp_wb")
         exp_year = st.number_input("Year for the date columns", 2024, 2100, 2026, key="exp_year", help="Year of the FIRST date column; a 15-Dec → 14-Jan sheet rolls into the next year automatically.")
+        exp_key = (hashlib.sha256(exp_up.getvalue()).hexdigest(), int(exp_year)) if exp_up else None
+        built = st.session_state.get("reconciled")
+        if built and built["key"] != exp_key:          # file or year changed: stale report
+            st.session_state.pop("reconciled", None)
+            built = None
         if exp_up and st.button("Build reconciled report", type="primary"):
+            st.session_state.pop("reconciled", None)
+            built = None
             closed = data.list_closed_cases(c)
-            if not closed:
-                st.warning("No closed cases yet — verify and close cases before exporting.")
+            unresolved = data.list_unresolved_cases(c)
+            if not (closed or unresolved):
+                st.warning("No cases yet — verify and close cases before exporting.")
             else:
                 try:  # read the upload in memory — no temp file shared between sessions
                     result = reconcile(io.BytesIO(exp_up.getvalue()), closed, VERDICT_LABEL,
-                                       year=int(exp_year), staff_gaps=data.list_reference_gaps(c))
+                                       year=int(exp_year), staff_gaps=data.list_reference_gaps(c),
+                                       unresolved_cases=unresolved)
                 except (KeyError, ValueError) as e:
                     st.error(f"Couldn't build the report ({e}). Upload the same workbook that has "
                              "the **Summary Report** tab, and check the Year.")
                 else:
-                    _show_reconcile_summary(result)
-                    st.download_button("⬇️ Download reconciled report", data=result.xlsx,
-                                       file_name=f"Attendance_Reconciled_{result.period}.xlsx",
-                                       mime="application/vnd.openxmlformats-officedocument."
-                                            "spreadsheetml.sheet")
+                    built = {"key": exp_key, "result": result}
+                    st.session_state["reconciled"] = built
+        if built:
+            result = built["result"]
+            _show_reconcile_summary(result)
+            needs_ack = bool(result.unresolved or result.blank_cells or result.not_in_workbook)
+            ack = (not needs_ack) or st.checkbox(
+                "I have read the warnings above: Pending and Missing days are NOT absences and "
+                "must be resolved before payroll.", key="reconcile_ack")
+            st.download_button("⬇️ Download reconciled report", data=result.xlsx,
+                               file_name=f"Attendance_Reconciled_{result.period}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument."
+                                    "spreadsheetml.sheet", disabled=not ack)
 
     with tab_uploads:
         st.write("Every attendance upload and its cases. Remove a bad upload, or clear everything to "

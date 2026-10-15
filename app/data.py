@@ -4,8 +4,9 @@ import json
 
 from psycopg.rows import dict_row
 
-from app import security
+from app import effective, security
 from app.tl_labels import tl_status_label, tl_verdict_label
+from ingestion.summary import UNMAPPED_NO_FLAGS
 
 
 # --------------------------------------------------------------------------- audit
@@ -226,13 +227,20 @@ def reopen_tl_cases(conn, case_ids, actor, reason) -> dict:
 
 # --------------------------------------------------------------------------- cases (HRBP side)
 def list_cases(conn, status=None, team=None, manager_id=None):
+    """HRBP case rows. Each keeps Original (source_status, plus the day's active source cell),
+    TL Response (manager_status) and HRBP Override (hrbp_override_*) apart, and adds the derived
+    effective_status / effective_source / needs_review (app.effective). New dicts per call."""
     q = ("select c.id, c.work_date, c.source_status, c.status, c.manager_status, c.leave_type, "
-         "       c.manager_comment, c.final_status, c.closed_by, "
+         "       c.manager_comment, c.manager_responded_at, c.final_status, c.closed_by, "
          "       c.hrbp_override_note, c.hrbp_override_by, c.hrbp_override_at, "
-         "       e.name as employee_name, e.crm as employee_crm, e.team, m.name as manager_name "
+         "       e.name as employee_name, e.crm as employee_crm, e.team, m.name as manager_name, "
+         "       a.raw_value as active_raw, a.bucket as active_bucket, "
+         "       a.canonical_status as active_status "
          "from attendance.cases c "
          "join attendance.employees e on e.id = c.employee_id "
-         "left join attendance.managers m on m.id = c.manager_id where true ")
+         "left join attendance.managers m on m.id = c.manager_id "
+         "left join attendance.v_active_days a "
+         "       on a.crm_key = lower(e.crm) and a.work_date = c.work_date where true ")
     params = []
     if status:
         q += "and c.status = %s "; params.append(status)
@@ -243,6 +251,28 @@ def list_cases(conn, status=None, team=None, manager_id=None):
     q += "order by c.status, e.name, c.work_date"
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(q, tuple(params))
+        rows = cur.fetchall()
+    return [_with_effective(r) for r in rows]
+
+
+def _with_effective(r):
+    eff = effective.for_case_row(r)
+    return {**r, "effective_status": eff.status, "effective_source": eff.source,
+            "needs_review": eff.needs_review}
+
+
+def list_unresolved_cases(conn):
+    """Cases nobody has decided yet (open / responded), shaped like list_closed_cases rows: the
+    reconciled export marks them Pending instead of leaving the workbook's Absent standing."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "select e.crm as employee_crm, e.name as employee_name, m.name as manager_name, "
+            "       c.work_date, c.source_status, c.closed_by, c.manager_comment "
+            "from attendance.cases c "
+            "join attendance.employees e on e.id = c.employee_id "
+            "left join attendance.managers m on m.id = c.manager_id "
+            "where c.status in ('open', 'manager_responded') "
+            "order by e.crm, c.work_date")
         return cur.fetchall()
 
 
@@ -275,6 +305,7 @@ def close_case(conn, case_id, actor, final_status=None, final_leave_type=None, c
         if old is None:  # allow overriding an already-closed (TL-finalized) case
             return False
         if final_status:
+            effective.validate_override(final_status)   # server-side: never trust the dropdown
             cur.execute(
                 "update attendance.cases set status = 'closed', final_status = %s, "
                 "final_leave_type = %s, closed_by = 'hrbp', closed_at = now(), "
@@ -313,12 +344,30 @@ def close_open_month(conn, actor) -> int:
     return len(ids)
 
 
+# D4 (ingestion.summary.UNMAPPED_NO_FLAGS): recorded per upload with work_date null so HRBP sees
+# it; NOT an absence, no case. Kept off the export's "Staff not in Attendance" sheet, whose
+# contents stay as before.
+
+
+def list_unmapped_no_flags(conn):
+    """D4 exceptions still open, newest upload first (HRBP Exceptions tab)."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute("select distinct on (x.crm) x.crm, x.raw_value as detail, "
+                    "       r.source_filename, r.created_at as uploaded_at "
+                    "from attendance.ingestion_exceptions x "
+                    "join attendance.ingestion_runs r on r.id = x.ingestion_run_id "
+                    "where x.reason = %s and x.resolved = false "
+                    "order by x.crm, r.created_at desc", (UNMAPPED_NO_FLAGS,))
+        return cur.fetchall()
+
+
 def list_reference_gaps(conn):
     """Undated exceptions = HC/Structure completeness gaps (staff not producing verifiable cases)."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute("select distinct crm, reason, raw_value as detail "
                     "from attendance.ingestion_exceptions "
-                    "where work_date is null and resolved = false order by reason, crm")
+                    "where work_date is null and resolved = false and reason <> %s "
+                    "order by reason, crm", (UNMAPPED_NO_FLAGS,))
         return cur.fetchall()
 
 
