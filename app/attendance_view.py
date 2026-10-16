@@ -10,12 +10,13 @@ tl_period_attendance  — TL-facing: the TL's team only; statuses are app.tl_lab
                         "Unclassified"); no raw cell text, HRBP note/actor, comments or evidence.
 hrbp_period_attendance — HRBP-facing: exact values, all employees (or one TL's team).
 
-SECURITY GATE (not Phase 1): TL links never expire. The non-expiring private-link model must be
-reviewed before any TL full-attendance UI built on this contract is released.
+SECURITY GATE: TL links are signed with a 60-day expiry since Phase 3 PR A; only a signed link
+(data.tl_access scope "team") may open a TL full-attendance UI built on this contract.
+Team scope per day follows recorded team history (app.team_scope, Phase 3 PR B).
 """
 from psycopg.rows import dict_row
 
-from app import effective
+from app import effective, team_scope
 from app.tl_labels import tl_status_label, tl_verdict_label
 from ingestion.periods import attendance_period, period_dates
 
@@ -27,6 +28,24 @@ _TEAM_SQL = """
     union
     select c.employee_id from attendance.cases c
      where c.manager_id = %(manager_id)s and c.work_date between %(ps)s and %(pe)s
+"""
+
+# TL-facing superset (Phase 3): anyone this TL has EVER been recorded as TL of, the current team,
+# and this period's own cases. app.team_scope then decides day by day; anything else is withheld.
+_TL_TEAM_SQL = """
+    select e.id from attendance.employees e where e.manager_id = %(manager_id)s
+    union
+    select t.employee_id from attendance.team_assignments t where t.manager_id = %(manager_id)s
+    union
+    select c.employee_id from attendance.cases c
+     where c.manager_id = %(manager_id)s and c.work_date between %(ps)s and %(pe)s
+"""
+
+_STRETCHES_SQL = """
+select employee_id, manager_id, first_seen_on, last_seen_on
+  from attendance.team_assignments
+ where employee_id = any(%s)
+ order by employee_id, first_seen_on, id
 """
 
 _GRID_SQL = """
@@ -149,20 +168,44 @@ def _without_case(r):
     return {**r, **_CASE_INPUTS}
 
 
+def _stretches(conn, employee_ids):
+    """{employee_id: [team_scope.Stretch, ...]} in recorded order, one query for all."""
+    out = {}
+    if not employee_ids:
+        return out
+    with conn.cursor() as cur:
+        cur.execute(_STRETCHES_SQL, (list(employee_ids),))
+        for emp, mgr, first, last in cur.fetchall():
+            out.setdefault(emp, []).append(team_scope.Stretch(mgr, first, last))
+    return out
+
+
 def tl_period_attendance(conn, manager_id, period_start):
     """The TL's team x every day of the 15th -> 14th period, TL-safe.
 
     `manager_id` MUST come from the TL's own link (data.manager_by_token), never from user input.
 
-    Team = employees currently assigned to this TL (`visibility = "team"`, every day), plus
-    employees with a case assigned to this TL in the period (`visibility = "case_only"`, ONLY those
-    case days — all their other days are withheld). A case assigned to ANOTHER TL (e.g. from before
+    Team days follow recorded team history (app.team_scope: an employee who moved shows the new TL
+    only the days from the first upload showing the move, and the old TL only the days up to the
+    last upload showing them as TL) — `visibility = "team"`. An employee with a case assigned to
+    this TL in the period but not on the team that day is `visibility = "case_only"`: ONLY those
+    case days, every other day withheld. An employee with neither a team day nor an own case in the
+    period is not returned at all. A case assigned to ANOTHER TL (e.g. from before
     an employee changed team) is never shown: its answer, override and pending state are dropped.
     No workbook bucket is exposed. Every row carries exactly TL_ROW_FIELDS:
     `status`, `tl_answer` and `hrbp_override_value` are app.tl_labels labels; raw cell text, HRBP
     note/actor, comments and evidence are never returned."""
+    ps, pe = _period(period_start)
+    grid = _grid(conn, ps, pe, _TL_TEAM_SQL, {"manager_id": manager_id})
+    history = _stretches(conn, {r["employee_id"] for r in grid})
+    keep = {r["employee_id"] for r in grid
+            if team_scope.on_team(history.get(r["employee_id"], []), r["current_manager_id"],
+                                  manager_id, r["work_date"])
+            or (r["case_id"] and r["case_manager_id"] == manager_id)}
     out = []
-    for r in hrbp_period_attendance(conn, period_start, manager_id=manager_id):
+    for r in grid:
+        if r["employee_id"] not in keep:
+            continue
         if r["case_id"] and r["case_manager_id"] != manager_id:
             r = _derive(_without_case(r))       # another TL's case: its outcome is not ours
         row = dict(r)
@@ -170,7 +213,8 @@ def tl_period_attendance(conn, manager_id, period_start):
         row["tl_answer"] = tl_verdict_label(r["tl_answer"])
         row["hrbp_override_value"] = (tl_verdict_label(r["final_status"])
                                       if r["hrbp_overridden"] else None)
-        member = r["current_manager_id"] == manager_id
+        member = team_scope.on_team(history.get(r["employee_id"], []), r["current_manager_id"],
+                                    manager_id, r["work_date"])
         row["visibility"] = "team" if member else "case_only"
         if not member and not (r["case_id"] and r["case_manager_id"] == manager_id):
             row.update(_WITHHELD)
