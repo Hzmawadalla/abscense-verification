@@ -177,3 +177,53 @@ def test_history_rows_are_protected_from_cascading_deletes(conn):
     with pytest.raises(psycopg.errors.CheckViolation):
         with conn.transaction():
             conn.execute("update attendance.team_assignments set last_seen_on = first_seen_on - 1")
+
+
+def test_moving_back_and_forth_at_the_database_level(conn):
+    _upload(conn, {"E-1": "TL-A"}, D(2026, 9, 15))
+    _upload(conn, {"E-1": "TL-B"}, D(2026, 9, 22))
+    _upload(conn, {"E-1": "TL-A"}, D(2026, 10, 1))
+    a, b = _team_days(conn, "TL-A", "E-1"), _team_days(conn, "TL-B", "E-1")
+    assert b == {D(2026, 9, 22)}                                      # B's only observed day
+    assert a == {d for d in _period_days() if d <= D(2026, 9, 15) or d >= D(2026, 10, 1)}
+
+
+def test_gap_days_reach_the_tl_with_no_attendance_values(conn):
+    _upload(conn, {"E-1": "TL-A"}, D(2026, 9, 15))
+    _upload(conn, {"E-1": "TL-B"}, D(2026, 10, 1))
+    _q(conn, "insert into attendance.ingestion_runs (source_filename, full_cells) values ('x', true)")
+    _q(conn, "insert into attendance.attendance_days (ingestion_run_id, crm, crm_key, employee_id, "
+             "work_date, raw_value, bucket, canonical_status, is_half_day) select r.id, 'E-1', "
+             "'e-1', e.id, %s, 'Sick Leave - surgery', 'skip', 'Sick Leave', false from "
+             "attendance.ingestion_runs r, attendance.employees e where e.crm = 'E-1'",
+       (D(2026, 9, 25),))
+    for tl in ("TL-A", "TL-B"):
+        rows = {r["work_date"]: r for r in tl_period_attendance(conn, _tl(conn, tl), P)
+                if r["employee_crm"] == "E-1"}
+        gap = rows[D(2026, 9, 25)]
+        assert gap["visibility"] == "case_only" and gap["status"] is None
+        assert gap["coverage"] == "none" and gap["flagged"] is False
+        assert "surgery" not in repr(rows) and "Sick" not in repr(rows)
+
+
+def test_hrbp_views_are_unchanged_by_history(conn):
+    from app.attendance_view import hrbp_period_attendance
+    _upload(conn, {"E-1": "TL-A"}, D(2026, 9, 15))
+    _upload(conn, {"E-1": "TL-B"}, D(2026, 10, 1))
+    everyone = hrbp_period_attendance(conn, P)
+    assert {r["work_date"] for r in everyone if r["employee_crm"] == "E-1"} == set(_period_days())
+    by_tl = hrbp_period_attendance(conn, P, manager_id=_tl(conn, "TL-B"))   # current-team rule
+    assert {r["work_date"] for r in by_tl if r["employee_crm"] == "E-1"} == set(_period_days())
+
+
+def test_a_move_recorded_by_old_code_after_the_migration_fails_closed(conn):
+    # migration seed says TL-A; an old-code upload moves employees.manager_id to TL-B without a
+    # stretch: A keeps up to the seed date, B sees nothing until a new-code upload records B
+    _upload(conn, {"E-1": "TL-A"}, D(2026, 9, 20))
+    _upload(conn, {"E-9": "TL-B"}, D(2026, 9, 21))            # makes sure TL-B exists
+    _q(conn, "update attendance.employees set manager_id = (select id from attendance.managers "
+             "where crm = 'TL-B') where crm = 'E-1'")
+    assert max(_team_days(conn, "TL-A", "E-1")) == D(2026, 9, 20)
+    assert _team_days(conn, "TL-B", "E-1") == set()
+    _upload(conn, {"E-1": "TL-B"}, D(2026, 10, 2))
+    assert min(_team_days(conn, "TL-B", "E-1")) == D(2026, 10, 2)

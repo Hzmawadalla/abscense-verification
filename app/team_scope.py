@@ -16,7 +16,13 @@ Rules (approved 2026-10-16), for the stretches of one employee in order:
   * an employee with no stretch at all (never seen since PR B) keeps the pre-PR B rule: their
     current TL, every day.
 So the previous TL keeps the days up to the last upload that showed them as TL, the new TL gets
-the days from the first upload that shows the move, and neither sees the other's stretch.
+the days from the first upload that shows the move, and neither sees the other's stretch — except
+on a day when two uploads showed both TLs (both stretches include that day).
+Adjacent stretches with the same TL are read as one (see merged()).
+
+Operational notes: one Structure upload that leaves an employee unmapped records a no-TL stretch,
+and the days until the next upload showing a TL belong to nobody; history is never rewritten, so
+such a gap can only be closed by a separately approved repair.
 Case days are separate: a TL always sees days with a case assigned to them (app.attendance_view).
 """
 import datetime as dt
@@ -29,12 +35,26 @@ class Stretch(NamedTuple):
     last_seen_on: dt.date
 
 
+def merged(stretches):
+    """Adjacent stretches with the same TL as one (two reference uploads racing can record the
+    same move twice; that must not open a gap inside one TL's own stretch)."""
+    out = []
+    for s in stretches:
+        if out and out[-1].manager_id == s.manager_id:
+            out[-1] = Stretch(s.manager_id, out[-1].first_seen_on,
+                              max(out[-1].last_seen_on, s.last_seen_on))
+        else:
+            out.append(s)
+    return out
+
+
 def on_team(stretches, current_manager_id, manager_id, day) -> bool:
     """Whether `day` of this employee is on `manager_id`'s team. `stretches` in recorded order."""
     if manager_id is None:
         return False
     if not stretches:
         return current_manager_id == manager_id
+    stretches = merged(stretches)
     last = len(stretches) - 1
     for i, s in enumerate(stretches):
         if s.manager_id != manager_id:

@@ -79,6 +79,12 @@ begin
                     and c.relrowsecurity and c.relforcerowsecurity) then
     raise exception 'Phase 3 post-check failed: RLS is not forced on team_assignments';
   end if;
+  if to_regclass('attendance.team_assignments_employee_idx') is null
+     or to_regclass('attendance.team_assignments_manager_idx') is null
+     or not exists (select 1 from pg_constraint where conname = 'team_assignments_seen_order')
+     or has_table_privilege('anon', 'attendance.team_assignments', 'select') then
+    raise exception 'Phase 3 post-check failed: an index, the check constraint or the revoke is missing';
+  end if;
 end $$;
 
 commit;

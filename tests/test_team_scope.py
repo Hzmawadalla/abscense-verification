@@ -78,3 +78,16 @@ def test_a_move_seen_on_the_15th_starts_the_new_period_only():
     s = [Stretch(A, D(2026, 9, 15), D(2026, 10, 14)), Stretch(B, D(2026, 10, 15), D(2026, 10, 15))]
     prev = [D(2026, 9, 15) + dt.timedelta(i) for i in range(30)]          # 15 Sep -> 14 Oct
     assert all(on_team(s, B, A, d) for d in prev) and not any(on_team(s, B, B, d) for d in prev)
+
+
+def test_adjacent_same_tl_stretches_are_one_no_gap_inside():
+    # two racing uploads can record the move twice: B, B must not open a gap inside B's stretch
+    s = [Stretch(A, D(2026, 9, 1), D(2026, 9, 10)), Stretch(B, D(2026, 9, 20), D(2026, 9, 21)),
+         Stretch(B, D(2026, 9, 25), D(2026, 9, 25))]
+    assert on_team(s, B, B, D(2026, 9, 23)) and on_team(s, B, B, D(2026, 12, 1))
+    assert not on_team(s, B, A, D(2026, 9, 23))
+
+
+def test_a_first_no_tl_stretch_gives_the_later_tl_no_earlier_days():
+    s = [Stretch(None, D(2026, 9, 1), D(2026, 9, 1)), Stretch(A, D(2026, 9, 20), D(2026, 9, 20))]
+    assert not on_team(s, A, A, D(2026, 9, 10)) and on_team(s, A, A, D(2026, 9, 20))
