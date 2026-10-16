@@ -51,7 +51,8 @@ def is_overwritable(cell_value) -> bool:
     return _base(normalize(cell_value)) in TRIGGER_EXACT
 
 
-LINKS_HEADER = ["TL name", "CRM", "Email", "Open cases", "Link"]
+# The count column holds the reminder count (app.reminders), not every open case on the link.
+LINKS_HEADER = ["TL name", "CRM", "Email", "Cases to remind", "Link"]
 
 
 def _locate_header(ws):

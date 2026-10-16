@@ -68,3 +68,9 @@ def test_a_missing_or_malformed_count_reminds_nobody(value):
 def test_with_remind_count_keeps_everything_else():
     m = r.with_remind_count(OVERVIEW[0])
     assert m == {**OVERVIEW[0], "open_cases": 1}
+
+
+def test_with_remind_count_is_idempotent():
+    # the senders re-apply it to whatever row they get, so applying it twice must change nothing
+    once = r.with_remind_count(OVERVIEW[0])
+    assert r.with_remind_count(once) == once

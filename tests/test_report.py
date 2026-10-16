@@ -140,7 +140,8 @@ def test_links_workbook_has_header_and_rows():
     data = build_links_workbook(rows)
     ws = openpyxl.load_workbook(io.BytesIO(data))["TL links"]
     r = list(ws.iter_rows(values_only=True))
-    assert r[0] == ("TL name", "CRM", "Email", "Open cases", "Link")
+    # changed on purpose (2026-10-16, option A): the column holds the reminder count
+    assert r[0] == ("TL name", "CRM", "Email", "Cases to remind", "Link")
     assert r[1] == ("Ahmed", "TL-A", "a@x.com", 3, "https://app/?t=abc")
 
 

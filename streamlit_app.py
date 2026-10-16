@@ -101,7 +101,9 @@ def mailer_client():
 
 
 def send_tl_link(c, client, mgr, base):
-    """Rotate a link and DM it to the TL over DingTalk; record the attempt either way."""
+    """Rotate a link and DM it to the TL over DingTalk; record the attempt either way. The count
+    sent and recorded is always the reminder count (app.reminders), whatever row is passed."""
+    mgr = reminders.with_remind_count(mgr)
     token = data.generate_manager_link(c, mgr["id"])
     link = f"{base}/?t={token}"
     try:
@@ -116,7 +118,9 @@ def send_tl_link(c, client, mgr, base):
 
 def send_tl_email(c, mailer, mgr, base, smtp=None):
     """Rotate a link and email it to the TL; record the attempt either way. Pass an open `smtp`
-    session to reuse one connection across a batch."""
+    session to reuse one connection across a batch. The count sent and recorded is always the
+    reminder count (app.reminders), whatever row is passed."""
+    mgr = reminders.with_remind_count(mgr)
     token = data.generate_manager_link(c, mgr["id"])
     link = f"{base}/?t={token}"
     try:
