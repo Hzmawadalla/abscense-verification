@@ -15,7 +15,7 @@ import os
 
 import streamlit as st
 
-from app import data, export_gate, ingest_flow, reminders
+from app import data, export_gate, ingest_flow, reminders, tl_links
 from app.dingtalk import DingTalkClient
 from app.mailer import SMTPMailer
 from app.report import build_links_workbook, reconcile
@@ -104,16 +104,16 @@ def send_tl_link(c, client, mgr, base):
     """Rotate a link and DM it to the TL over DingTalk; record the attempt either way. The count
     sent and recorded is always the reminder count (app.reminders), whatever row is passed."""
     mgr = reminders.with_remind_count(mgr)
-    token = data.generate_manager_link(c, mgr["id"])
+    token, issued = data.issue_manager_link(c, mgr["id"])
     link = f"{base}/?t={token}"
     try:
         resp = client.send_link(mgr["dingtalk_userid"], mgr["name"], link, mgr["open_cases"])
         data.record_notification(c, mgr["id"], "dingtalk", mgr["open_cases"], "sent",
                                  provider_message_id=str(resp.get("task_id")))
-        return True, None
+        return True, None, issued
     except Exception as e:  # noqa: BLE001 — surface any dispatch failure, never silently drop
         data.record_notification(c, mgr["id"], "dingtalk", mgr["open_cases"], "failed", error=str(e))
-        return False, str(e)
+        return False, str(e), issued
 
 
 def send_tl_email(c, mailer, mgr, base, smtp=None):
@@ -121,24 +121,28 @@ def send_tl_email(c, mailer, mgr, base, smtp=None):
     session to reuse one connection across a batch. The count sent and recorded is always the
     reminder count (app.reminders), whatever row is passed."""
     mgr = reminders.with_remind_count(mgr)
-    token = data.generate_manager_link(c, mgr["id"])
+    token, issued = data.issue_manager_link(c, mgr["id"])
     link = f"{base}/?t={token}"
     try:
         mailer.send_link(mgr["email"], mgr["name"], link, mgr["open_cases"], smtp=smtp)
         data.record_notification(c, mgr["id"], "email", mgr["open_cases"], "sent")
-        return True, None
+        return True, None, issued
     except Exception as e:  # noqa: BLE001 — surface any dispatch failure, never silently drop
         data.record_notification(c, mgr["id"], "email", mgr["open_cases"], "failed", error=str(e))
-        return False, str(e)
+        return False, str(e), issued
 
 
 # ============================================================ TL LAYER (token link)
 def render_tl(token: str):
     c = conn()
-    mgr = data.manager_by_token(c, token)
-    if not mgr:
-        st.error("This link is invalid or has been rotated. Please contact HR for a new link.")
+    access = data.tl_access(c, token)
+    if access.status == "expired":           # nothing about the TL, team or cases is shown
+        st.error(tl_links.EXPIRED_MESSAGE)
         return
+    if access.status != "ok":
+        st.error(tl_links.INVALID_MESSAGE)
+        return
+    mgr = access.manager
 
     st.title("Attendance Verification")
     st.caption(f"Team Leader: **{mgr['name'] or mgr['crm']}** — please confirm each flagged day for your team.")
@@ -606,17 +610,20 @@ def render_hrbp():
         bulk = st.columns(2)
         if mailer and bulk[0].button(f"📧 Email links to all TLs with cases to remind ({len(emailable)})",
                                      type="primary", disabled=not emailable):
-            sent = fail = 0
+            sent = fail = issued = 0
             try:
                 with mailer.connect() as smtp:  # one login reused for the whole batch
                     for mgr in emailable:
-                        ok, _ = send_tl_email(c, mailer, mgr, base, smtp=smtp)
+                        ok, _, new = send_tl_email(c, mailer, mgr, base, smtp=smtp)
                         sent += ok
                         fail += (not ok)
+                        issued += new
             except Exception as e:  # noqa: BLE001 — mail-server connection/login failure
                 st.error(f"Couldn't connect to the mail server — check the SMTP secrets. ({e})")
             else:
                 msg = f"Email: sent {sent}, failed {fail}."
+                if issued:
+                    msg += f" {issued} TL link(s) were newly issued (the previous link stopped working)."
                 if no_email:
                     msg += f" {len(no_email)} TL(s) skipped — no email on file."
                 (st.success if not fail else st.warning)(msg)
@@ -627,12 +634,15 @@ def render_hrbp():
             help="Off by default. Tick this to arm the bulk DingTalk send, then press the button.")
         if client and bulk[1].button(f"📨 DingTalk to all TLs with cases to remind "
                                      f"({len(targets['dingtalk'])})", disabled=not dt_armed):
-            sent = fail = 0
+            sent = fail = issued = 0
             for mgr in targets["dingtalk"]:
-                ok, _ = send_tl_link(c, client, mgr, base)
+                ok, _, new = send_tl_link(c, client, mgr, base)
                 sent += ok
                 fail += (not ok)
-            st.success(f"DingTalk: sent {sent}, failed {fail}.")
+                issued += new
+            st.success(f"DingTalk: sent {sent}, failed {fail}."
+                       + (f" {issued} TL link(s) were newly issued (the previous link stopped "
+                          "working)." if issued else ""))
         if no_email:
             st.caption(f"⚠️ {len(no_email)} TL with cases to remind have no email on file — use their **Link** "
                        "button to copy and send manually.")
@@ -641,20 +651,25 @@ def render_hrbp():
         with_open = targets["links"]
         if st.button(f"⬇️ Prepare all TL links for download ({len(with_open)} with cases to remind)",
                      disabled=not with_open):
-            link_rows = []
+            link_rows, issued = [], 0
             for mgr in with_open:
-                tok = data.generate_manager_link(c, mgr["id"])
+                tok, new = data.issue_manager_link(c, mgr["id"])
+                issued += new
                 link_rows.append({"name": mgr["name"] or mgr["crm"], "crm": mgr["crm"],
                                   "email": mgr.get("email"), "open_cases": mgr["open_cases"],
                                   "link": f"{base}/?t={tok}"})
             st.session_state["links_xlsx"] = build_links_workbook(link_rows)
             st.session_state["links_n"] = len(link_rows)
+            st.session_state["links_issued"] = issued
         if st.session_state.get("links_xlsx"):
             st.download_button(f"⬇️ Download TL_links.xlsx ({st.session_state.get('links_n', 0)} TLs)",
                                data=st.session_state["links_xlsx"], file_name="TL_links.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             st.caption("These are the current valid links — preparing again returns the **same** links, "
-                       "so re-downloading is safe.")
+                       "so re-downloading is safe (an expired link is replaced by a new one).")
+            if st.session_state.get("links_issued"):
+                st.warning(f"{st.session_state['links_issued']} TL link(s) in this file were newly "
+                           "issued — the previous link for those TLs stopped working.")
 
         for mgr in overview:
             cols = st.columns([4, 1, 1, 1, 3])
@@ -667,7 +682,7 @@ def render_hrbp():
                 st.session_state[f"link{mgr['id']}"] = f"{base}/?t={tok}"
             can_email = bool(mailer and mgr.get("email") and due)
             if cols[2].button("Email", key=f"eml{mgr['id']}", disabled=not can_email):
-                ok, err = send_tl_email(c, mailer, reminders.with_remind_count(mgr), base)
+                ok, err, _ = send_tl_email(c, mailer, reminders.with_remind_count(mgr), base)
                 st.success(f"Emailed {mgr['name']}.") if ok else st.error(f"Failed: {err}")
             # Rotate is the ONLY action that invalidates an existing link — gated by a confirm box.
             confirm = cols[3].checkbox("↻?", key=f"rotok{mgr['id']}",
