@@ -149,6 +149,13 @@ def resolve_date_columns(day_cols, data_rows, crm_idx):
     return kept, duplicates
 
 
+# D4: a sheet CRM that HC/Structure doesn't know and that has no flagged day in this upload.
+# Without this it would leave no trace at all (a flagged day already raises "unknown_employee").
+# work_date stays None: it is an employee-level gap, never an absence, and creates no case.
+UNMAPPED_NO_FLAGS = "unknown_employee_no_flags"
+UNMAPPED_NO_FLAGS_DETAIL = "in the attendance sheet, not in HC/Structure; no flagged day in this upload"
+
+
 @dataclass
 class CaseCandidate:
     employee_crm: str
@@ -233,6 +240,8 @@ def ingest_summary(path, reference, year, sheet="Summary Report", header_row=3):
     buckets = {"skip": 0, "not_verified": 0, "trigger": 0, "ignore": 0, "unknown": 0}
 
     first_row = {}                # crm_key -> sheet row of its first occurrence
+    unknown_flagged = set()       # crm_keys of unknown employees that raised unknown_employee
+    unknown_crms = {}             # crm_key -> the sheet's CRM, for unknown employees (D4)
     for sheet_row, r in enumerate(rows[1:], start=hdr_idx + 2):
         crm = _clean(r[crm_idx]) if crm_idx < len(r) else None
         if not crm or _is_junk_crm(crm):
@@ -247,6 +256,8 @@ def ingest_summary(path, reference, year, sheet="Summary Report", header_row=3):
                 "duplicate_row"))
             continue
         first_row[key] = sheet_row
+        if emp is None:
+            unknown_crms[key] = crm
         for i, day in day_cols:
             val = r[i] if i < len(r) else None
             blank = val is None or str(val).strip() == ""
@@ -270,6 +281,7 @@ def ingest_summary(path, reference, year, sheet="Summary Report", header_row=3):
             if bucket != "trigger":
                 continue
             if emp is None:
+                unknown_flagged.add(key)
                 result.exceptions.append(IngestionException(crm, day, raw, "unknown_employee"))
             elif getattr(emp, "exit_date", None) and day > emp.exit_date:
                 result.exceptions.append(IngestionException(crm, day, raw, "after_last_working_day"))
@@ -281,6 +293,11 @@ def ingest_summary(path, reference, year, sheet="Summary Report", header_row=3):
                 result.cases.append(CaseCandidate(
                     employee_crm=emp.crm, manager_crm=emp.manager_crm, work_date=day,
                     source_status=raw, is_half_day=is_hd))
+
+    for key, crm in unknown_crms.items():
+        if key not in unknown_flagged:
+            result.exceptions.append(IngestionException(crm, None, UNMAPPED_NO_FLAGS_DETAIL,
+                                                        UNMAPPED_NO_FLAGS))
 
     dates = [d for _, d in day_cols]
     result.stats = {

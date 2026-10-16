@@ -8,7 +8,10 @@ production adapter wraps a psycopg connection. All statements are schema-qualifi
   replaces is never lost,
 - every cell of the sheet (flagged or not, blanks included) is stored per upload in
   attendance_days (Phase 1); the newest upload per CRM + date is the active source,
-- exceptions are recorded per ingestion run."""
+- exceptions are recorded per ingestion run,
+- a newer upload that no longer flags a day with an existing case is audited
+  ('source_unflagged', Phase 2): the case, its answer, evidence and override are left as they are
+  and HRBP sees it as review-required (app.effective)."""
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -114,6 +117,36 @@ values
 """
 
 
+# Runs AFTER this upload's cells are stored, once: every existing case whose day this upload now
+# covers with a non-flagged cell (blank included) gets one audit entry holding the case's flagged
+# text (old) and the new cell (new). Nothing on the case changes. Skipped when the case's latest
+# source entry already records this same unflagged value, so re-uploading the same file doesn't
+# repeat it.
+AUDIT_SOURCE_UNFLAGGED = """
+insert into attendance.audit_log (case_id, actor, action, old_value, new_value)
+select c.id, %(actor)s, 'source_unflagged',
+  jsonb_build_object('employee_crm', e.crm, 'work_date', c.work_date,
+                     'source_status', c.source_status, 'is_half_day', c.is_half_day,
+                     'case_status', c.status),
+  jsonb_build_object('employee_crm', e.crm, 'work_date', c.work_date,
+                     'raw_value', d.raw_value, 'bucket', d.bucket,
+                     'ingestion_run_id', %(run_id)s::uuid)
+from attendance.attendance_days d
+join attendance.cases c on c.employee_id = d.employee_id and c.work_date = d.work_date
+join attendance.employees e on e.id = c.employee_id
+where d.ingestion_run_id = %(run_id)s::uuid
+  and d.bucket <> 'trigger'
+  and not exists (
+    select 1 from (
+      select l.action, l.new_value from attendance.audit_log l
+       where l.case_id = c.id and l.action in ('source_status_changed', 'source_unflagged')
+       order by l.created_at desc, l.id desc limit 1) last
+     where last.action = 'source_unflagged'
+       and last.new_value->>'raw_value' is not distinct from d.raw_value
+       and last.new_value->>'bucket' = d.bucket)
+"""
+
+
 def manager_params(m):
     return (m.crm, m.name, m.email)
 
@@ -175,5 +208,7 @@ def load_ingestion(db: DB, result, reference=None, source_filename=None, range_s
     exc_rows += [(run_id, e.crm, None, e.detail, e.reason) for e in ref_excs]
     db.many(INSERT_EXCEPTION, exc_rows)
     db.many(INSERT_DAY, [day_params(cell, run_id) for cell in cells])
+    if cells:
+        db.many(AUDIT_SOURCE_UNFLAGGED, [{"actor": actor, "run_id": str(run_id)}])
     return LoadSummary(run_id=run_id, managers=0, employees=0,
                        cases=len(result.cases), exceptions=total_exc)

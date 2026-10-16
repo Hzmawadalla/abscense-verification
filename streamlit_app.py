@@ -15,7 +15,7 @@ import os
 
 import streamlit as st
 
-from app import data, ingest_flow
+from app import data, export_gate, ingest_flow, reminders
 from app.dingtalk import DingTalkClient
 from app.mailer import SMTPMailer
 from app.report import build_links_workbook, reconcile
@@ -23,6 +23,7 @@ from app.attachments import (EXPORT_EXPIRES_IN, evidence_columns, filter_by_crm,
                              group_by_case)
 from app.storage import StorageClient, object_path, validate_upload
 from app.tl_labels import tl_case_line, tl_done_line
+from app.effective import UNRESOLVED_STATES
 from app.verdicts import (HRBP_OVERRIDE_VERDICTS, PROOF_REQUIRED, VERDICT_LABEL, VERDICTS,
                           blocked_cases, is_blocked, unanswered, verdict_choices)
 from app.version import build_stamp
@@ -100,7 +101,9 @@ def mailer_client():
 
 
 def send_tl_link(c, client, mgr, base):
-    """Rotate a link and DM it to the TL over DingTalk; record the attempt either way."""
+    """Rotate a link and DM it to the TL over DingTalk; record the attempt either way. The count
+    sent and recorded is always the reminder count (app.reminders), whatever row is passed."""
+    mgr = reminders.with_remind_count(mgr)
     token = data.generate_manager_link(c, mgr["id"])
     link = f"{base}/?t={token}"
     try:
@@ -115,7 +118,9 @@ def send_tl_link(c, client, mgr, base):
 
 def send_tl_email(c, mailer, mgr, base, smtp=None):
     """Rotate a link and email it to the TL; record the attempt either way. Pass an open `smtp`
-    session to reuse one connection across a batch."""
+    session to reuse one connection across a batch. The count sent and recorded is always the
+    reminder count (app.reminders), whatever row is passed."""
+    mgr = reminders.with_remind_count(mgr)
     token = data.generate_manager_link(c, mgr["id"])
     link = f"{base}/?t={token}"
     try:
@@ -274,6 +279,19 @@ def hrbp_authenticator():
     return stauth.Authenticate(creds, "attendance_auth", cookie, cookie_expiry_days=1)
 
 
+def override_layers(r) -> list[str]:
+    """The four layers of one case for HRBP, as markdown bullets: Original, TL, Override, Effective."""
+    current = r["active_raw"] or ("blank" if r["active_bucket"] == "blank" else "—")
+    tl = VERDICT_LABEL.get(r["manager_status"], r["manager_status"] or "—")
+    override = (VERDICT_LABEL.get(r["final_status"], r["final_status"])
+                if r.get("hrbp_override_at") else "—")
+    return [f"- **Original:** {r['source_status'] or '—'} (current source: {current})",
+            f"- **TL response:** {tl} · TL comment: {r['manager_comment'] or '—'}",
+            f"- **HRBP override:** {override}",
+            f"- **Effective:** **{r['effective_status']}** (decided by {r['effective_source']})"
+            + (" · ⚠️ needs review: the source changed" if r["needs_review"] else "")]
+
+
 def _show_reconcile_summary(result):
     """What the export actually did: written vs kept vs missing, not just a case count."""
     st.success(f"**{result.overwritten}** cell(s) updated to the final verdict "
@@ -286,8 +304,16 @@ def _show_reconcile_summary(result):
                    "this file — listed in Changes as *not in workbook*.")
     if result.other_period:
         st.caption(f"{result.other_period} closed case(s) from other periods were left out.")
+    if result.unresolved:
+        st.warning(f"⚠️ **{result.unresolved}** unresolved case(s) in this period — nobody has "
+                   f"decided them yet. **{result.pending_marked}** Absent / No Show cell(s) now read "
+                   "**Pending** (never Absent); the rest are listed in Changes with After = Pending.")
+    if result.blank_cells:
+        st.info(f"ℹ️ **{result.blank_cells}** empty cell(s) in this file (CRM rows × date "
+                "columns) — left blank, never counted as Absent. Some are normal (before a join "
+                "date, after an exit); check any that should hold attendance.")
     if result.other_period and not (result.overwritten or result.skipped_not_absent
-                                    or result.not_in_workbook):
+                                    or result.not_in_workbook or result.unresolved):
         st.warning("No closed case falls inside this file's dates — check the Year, or that this "
                    "is the right period's workbook.")
 
@@ -322,8 +348,23 @@ def render_hrbp():
         m[0].metric("Open", counts.get("open", 0))
         m[1].metric("Responded", counts.get("manager_responded", 0))
         m[2].metric("Closed", counts.get("closed", 0))
-        status_filter = st.selectbox("Show", ["manager_responded", "open", "closed", "(all)"])
-        rows = data.list_cases(c, status=None if status_filter == "(all)" else status_filter)
+        status_filter = st.selectbox("Show", ["manager_responded", "open", "closed", "(all)",
+                                              "(needs review)", "(undecided)"],
+                                     help="(undecided) = Pending or Review required, including "
+                                          "cases the old period close stored as Absent.")
+        st.caption("Cases the old period close (before 2026-10) stored as Absent count as "
+                   "**Closed** above but read **Pending**: they are not on the TL link, so only an "
+                   "HRBP Override decides them. Use *(undecided)* to list them.")
+        listed = None if status_filter.startswith("(") else status_filter
+        rows = data.list_cases(c, status=listed)
+        if status_filter == "(needs review)":
+            rows = [r for r in rows if r["needs_review"]]
+        elif status_filter == "(undecided)":
+            rows = [r for r in rows if r["effective_status"] in UNRESOLVED_STATES]
+        review_n = sum(1 for r in rows if r["needs_review"])
+        if review_n:
+            st.warning(f"⚠️ {review_n} case(s) shown need HRBP review: a newer upload changed or no "
+                       "longer flags the day. Nothing was voided — decide them with an override.")
 
         # Search by CRM, never by name — names collide and re-spell; the CRM is the stable key.
         crm_q = st.text_input("Search by CRM", placeholder="e.g. EGLP-hamedem",
@@ -365,19 +406,32 @@ def render_hrbp():
                          "evidence": st.column_config.NumberColumn(
                              "Files", help="Screenshots attached by the TL."),
                          "employee_crm": st.column_config.TextColumn("CRM"),
+                         "source_status": st.column_config.TextColumn(
+                             "Original (flagged)", help="The cell text the case was created from."),
+                         "active_raw": st.column_config.TextColumn(
+                             "Current source", help="The newest upload's cell for this day."),
+                         "manager_status": st.column_config.TextColumn("TL response"),
+                         "final_status": st.column_config.TextColumn("Final (stored)"),
+                         "effective_status": st.column_config.TextColumn(
+                             "Effective", help="HRBP Override > TL Response > Original Attendance."),
+                         "effective_source": st.column_config.TextColumn("Decided by"),
+                         "needs_review": st.column_config.CheckboxColumn("Needs review"),
+                         "active_bucket": None, "active_status": None,
                      })
         st.caption("A case with more than one file links to the first — **Files** shows the total.")
 
         st.subheader("HRBP Override (optional)")
-        st.caption("TL verdicts finalize automatically — use this only to correct a specific case.")
-        finalized = data.list_cases(c, status="closed")
-        if finalized:
-            label = {f"{r['employee_name']} · {r['work_date']} · final: {r['final_status']}": r
-                     for r in finalized}
-            pick = st.selectbox("Finalized case", list(label))
+        st.caption("TL verdicts finalize automatically — use this to correct a case, or to decide "
+                   "one that is still Pending or needs review.")
+        overridable = data.list_cases(c)
+        if overridable:
+            label = {f"{r['employee_name']} · {r['employee_crm']} · {r['work_date']} · "
+                     f"effective: {r['effective_status']}"
+                     + (" · ⚠️ review" if r["needs_review"] else ""): r
+                     for r in overridable}
+            pick = st.selectbox("Case", list(label))
             r = label[pick]
-            st.write(f"Current final: **{r['final_status']}** · TL said *{r['manager_status'] or '—'}* · "
-                     f"TL comment: {r['manager_comment'] or '—'}")
+            st.markdown("\n".join(override_layers(r)))
             if r.get("hrbp_override_at"):
                 st.write(f"HRBP Override by **{r['hrbp_override_by']}** at "
                          f"{r['hrbp_override_at']:%Y-%m-%d %H:%M} — {r['hrbp_override_note'] or '—'}")
@@ -406,12 +460,16 @@ def render_hrbp():
                 if not ovc.strip():
                     st.error("Override requires a reason.")
                 else:
-                    data.close_case(c, r["id"], actor, final_status=HRBP_OVERRIDE_VERDICTS[ov],
-                                    comment=ovc)
-                    st.success("HRBP Override saved.")
-                    st.rerun()
+                    try:
+                        data.close_case(c, r["id"], actor,
+                                        final_status=HRBP_OVERRIDE_VERDICTS[ov], comment=ovc)
+                    except ValueError:
+                        st.error("That override value is not supported.")
+                    else:
+                        st.success("HRBP Override saved.")
+                        st.rerun()
         else:
-            st.caption("No finalized cases yet.")
+            st.caption("No cases yet.")
 
     with tab_ingest:
         st.write("Upload this period's workbooks to create verification cases. The **HC** and "
@@ -500,6 +558,10 @@ def render_hrbp():
                 st.success(f"Loaded {summary.cases} cases, {summary.exceptions} exceptions "
                            f"({ref.stats['mapped_employees']}/{ref.stats['employees']} employees mapped)."
                            + (f" Applied {applied} DingTalk id(s)." if applied else ""))
+                d4 = pending["preview"].get("unmapped_no_flags")
+                if d4:
+                    st.warning(f"{d4} CRM(s) in the sheet are not in HC/Structure and have no "
+                               "flagged day — see ⚠️ Exceptions. No absence was recorded for them.")
             if col_cancel.button("Discard"):
                 st.session_state.pop("ingest_preview", None)
                 st.rerun()
@@ -507,12 +569,21 @@ def render_hrbp():
     with tab_exc:
         exc = data.list_exceptions(c, resolved=False)
         actionable = [e for e in exc if e.get("work_date") is not None]  # attendance-day problems
-        gaps = len(exc) - len(actionable)                                 # HC/Structure gaps (no date)
+        d4_rows = data.list_unmapped_no_flags(c)
+        gaps = sum(1 for e in exc if e.get("work_date") is None
+                   and e.get("reason") != data.UNMAPPED_NO_FLAGS)   # HC/Structure gaps (no date)
         st.write(f"**{len(actionable)}** attendance exception(s) to work — the day-level worklist.")
         if gaps:
             st.caption(f"➕ {gaps} reference/'Staff not in Attendance' item(s) (no date) are excluded "
                        "here and exported on the **Staff not in Attendance** sheet in 📤 Export.")
         st.dataframe(actionable, use_container_width=True, hide_index=True)
+        if d4_rows:
+            st.subheader(f"Not in HC/Structure — no flagged day ({len(d4_rows)})")
+            st.caption("These CRMs appear in an attendance sheet but not in HC/Structure, and had no "
+                       "flagged day. **This is not an absence and not a missing cell**: their cells "
+                       "are stored, no case was created. Add them to HC/Structure if they should be "
+                       "verified.")
+            st.dataframe(d4_rows, use_container_width=True, hide_index=True)
 
     with tab_links:
         st.write("Generate each TL's unique link and send it — by **email**, DingTalk, or copy manually.")
@@ -525,11 +596,15 @@ def render_hrbp():
             st.info("📧 Email not configured. Add SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASSWORD / "
                     "MAIL_FROM to Secrets (e.g. Brevo's SMTP relay) to enable one-click email sending.")
         overview = data.managers_overview(c)
-        emailable = [m for m in overview if m["open_cases"] and m.get("email")]
-        no_email = [m for m in overview if m["open_cases"] and not m.get("email")]
+        targets = reminders.reminder_targets(overview)    # one rule for counts and recipients
+        emailable, no_email = targets["email"], targets["no_email"]
+        held = sum(m["open_cases"] - reminders.remind_count(m) for m in overview)
+        if held:
+            st.caption(f"ℹ️ {held} open case(s) were left open by a period close: they stay on the "
+                       "TL links and on the Dashboard, but reminders below don't count or chase them.")
 
         bulk = st.columns(2)
-        if mailer and bulk[0].button(f"📧 Email links to all TLs with open cases ({len(emailable)})",
+        if mailer and bulk[0].button(f"📧 Email links to all TLs with cases to remind ({len(emailable)})",
                                      type="primary", disabled=not emailable):
             sent = fail = 0
             try:
@@ -550,22 +625,21 @@ def render_hrbp():
         dt_armed = client is not None and bulk[1].checkbox(
             "Enable DingTalk sending", key="dt_armed",
             help="Off by default. Tick this to arm the bulk DingTalk send, then press the button.")
-        if client and bulk[1].button("📨 DingTalk to all TLs with open cases",
-                                     disabled=not dt_armed):
+        if client and bulk[1].button(f"📨 DingTalk to all TLs with cases to remind "
+                                     f"({len(targets['dingtalk'])})", disabled=not dt_armed):
             sent = fail = 0
-            for mgr in overview:
-                if mgr["dingtalk_userid"] and mgr["open_cases"]:
-                    ok, _ = send_tl_link(c, client, mgr, base)
-                    sent += ok
-                    fail += (not ok)
+            for mgr in targets["dingtalk"]:
+                ok, _ = send_tl_link(c, client, mgr, base)
+                sent += ok
+                fail += (not ok)
             st.success(f"DingTalk: sent {sent}, failed {fail}.")
         if no_email:
-            st.caption(f"⚠️ {len(no_email)} TL with open cases have no email on file — use their **Link** "
+            st.caption(f"⚠️ {len(no_email)} TL with cases to remind have no email on file — use their **Link** "
                        "button to copy and send manually.")
 
         # Bulk download for manual distribution (mail-merge / copy) — no email or DingTalk needed.
-        with_open = [m for m in overview if m["open_cases"]]
-        if st.button(f"⬇️ Prepare all TL links for download ({len(with_open)} with open cases)",
+        with_open = targets["links"]
+        if st.button(f"⬇️ Prepare all TL links for download ({len(with_open)} with cases to remind)",
                      disabled=not with_open):
             link_rows = []
             for mgr in with_open:
@@ -585,13 +659,15 @@ def render_hrbp():
         for mgr in overview:
             cols = st.columns([4, 1, 1, 1, 3])
             email = mgr.get("email") or "— no email —"
-            cols[0].write(f"**{mgr['name'] or mgr['crm']}** · {mgr['open_cases']} open · {email}")
+            due = reminders.remind_count(mgr)
+            cols[0].write(f"**{mgr['name'] or mgr['crm']}** · {mgr['open_cases']} open "
+                          f"({due} to remind) · {email}")
             if cols[1].button("Link", key=f"gl{mgr['id']}"):
                 tok = data.generate_manager_link(c, mgr["id"])
                 st.session_state[f"link{mgr['id']}"] = f"{base}/?t={tok}"
-            can_email = bool(mailer and mgr.get("email") and mgr["open_cases"])
+            can_email = bool(mailer and mgr.get("email") and due)
             if cols[2].button("Email", key=f"eml{mgr['id']}", disabled=not can_email):
-                ok, err = send_tl_email(c, mailer, mgr, base)
+                ok, err = send_tl_email(c, mailer, reminders.with_remind_count(mgr), base)
                 st.success(f"Emailed {mgr['name']}.") if ok else st.error(f"Failed: {err}")
             # Rotate is the ONLY action that invalidates an existing link — gated by a confirm box.
             confirm = cols[3].checkbox("↻?", key=f"rotok{mgr['id']}",
@@ -639,37 +715,65 @@ def render_hrbp():
                         st.rerun()
 
     with tab_close:
-        st.error("⚠️ **DANGER — this is NOT a 'save' or 'process' button.** It permanently closes "
-                 "**every** open case as **Absent** and **cannot be undone**. Use it only at the very "
-                 "end of the cycle, once every case has been verified.")
+        st.warning("**Period close records the cut-off — it decides nothing.** Every case still "
+                   "undecided stays **open** and reads **Pending** (or **Review required** when the "
+                   "newest upload no longer flags its day). Nothing is turned into Absent. TLs can "
+                   "still answer on their link, and you can still decide any case with an HRBP "
+                   "Override. Each still-open case gets a note in its history, so an upload "
+                   "whose cases are still open can no longer be removed afterwards.")
+        st.caption("Expect Pending cells in the payroll export for anything still undecided.")
         typed = st.text_input("To confirm, type the word  CLOSE  in capitals:")
         if st.button("Close the period now", type="primary", disabled=(typed.strip() != "CLOSE")):
-            n = data.close_open_month(c, actor)
-            st.success(f"Closed {n} open case(s) as Absent.")
+            res = data.close_open_month(c, actor)
+            total = res["pending"] + res["kept_for_review"]
+            if not total:
+                st.success("Period closed — no undecided case left.")
+            else:
+                st.warning(f"Period closed — **{total}** case(s) are still undecided and stay "
+                           f"open: **{res['pending']}** Pending, **{res['kept_for_review']}** "
+                           "Review required (the newest upload no longer flags the day). None was "
+                           "set to Absent. Decide them on the Dashboard with an HRBP Override.")
 
     with tab_export:
-        st.write("Re-upload this period's attendance workbook to get it back with every **closed** "
-                 "case updated to its final verdict, plus a **Changes** sheet of before → after.")
+        st.write("Re-upload this period's attendance workbook to get it back with every **decided** "
+                 "case updated to its final verdict, plus a **Changes** sheet of before → after. "
+                 "Undecided cases read **Pending**, never Absent.")
         exp_up = st.file_uploader("Attendance report — Summary Report tab (.xlsx)",
                                   type=["xlsx"], key="exp_wb")
         exp_year = st.number_input("Year for the date columns", 2024, 2100, 2026, key="exp_year", help="Year of the FIRST date column; a 15-Dec → 14-Jan sheet rolls into the next year automatically.")
+        exp_key = (hashlib.sha256(exp_up.getvalue()).hexdigest(), int(exp_year)) if exp_up else None
+        built = export_gate.current(st.session_state, exp_key)   # file or year changed: reset
         if exp_up and st.button("Build reconciled report", type="primary"):
+            export_gate.reset(st.session_state)      # every new report needs a fresh tick
+            built = None
             closed = data.list_closed_cases(c)
-            if not closed:
-                st.warning("No closed cases yet — verify and close cases before exporting.")
+            unresolved = data.list_unresolved_cases(c)
+            if not (closed or unresolved):
+                st.warning("No cases yet — verify and close cases before exporting.")
             else:
                 try:  # read the upload in memory — no temp file shared between sessions
                     result = reconcile(io.BytesIO(exp_up.getvalue()), closed, VERDICT_LABEL,
-                                       year=int(exp_year), staff_gaps=data.list_reference_gaps(c))
+                                       year=int(exp_year), staff_gaps=data.list_reference_gaps(c),
+                                       unresolved_cases=unresolved)
                 except (KeyError, ValueError) as e:
                     st.error(f"Couldn't build the report ({e}). Upload the same workbook that has "
                              "the **Summary Report** tab, and check the Year.")
                 else:
-                    _show_reconcile_summary(result)
-                    st.download_button("⬇️ Download reconciled report", data=result.xlsx,
-                                       file_name=f"Attendance_Reconciled_{result.period}.xlsx",
-                                       mime="application/vnd.openxmlformats-officedocument."
-                                            "spreadsheetml.sheet")
+                    built = {"key": exp_key, "result": result}
+                    st.session_state[export_gate.BUILT_KEY] = built
+        if built:
+            result = built["result"]
+            _show_reconcile_summary(result)
+            st.caption("The report reflects the cases at the moment it was built — build it "
+                       "again after deciding more cases.")
+            ticked = export_gate.needs_ack(result) and st.checkbox(   # blanks: info only
+                "I have read the warnings above: Pending and Missing days are NOT absences and "
+                "must be resolved before payroll.", key=export_gate.ACK_KEY)
+            st.download_button("⬇️ Download reconciled report", data=result.xlsx,
+                               file_name=f"Attendance_Reconciled_{result.period}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument."
+                                    "spreadsheetml.sheet",
+                               disabled=not export_gate.download_enabled(result, ticked))
 
     with tab_uploads:
         st.write("Every attendance upload and its cases. Remove a bad upload, or clear everything to "

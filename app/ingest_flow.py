@@ -12,6 +12,7 @@ import hashlib
 from ingestion import loader
 from ingestion.db_psycopg import PsycopgDB
 from ingestion.periods import attendance_period
+from ingestion.summary import UNMAPPED_NO_FLAGS
 
 
 def preview_key(ref_bytes, att_bytes, year) -> tuple:
@@ -34,6 +35,7 @@ def build_preview(res, ref, earlier_uploads=()) -> dict:
         "exceptions": len(res.exceptions),
         "duplicate_dates": list(res.stats.get("duplicate_dates", [])),
         "duplicate_rows": reasons.count("duplicate_row"),
+        "unmapped_no_flags": reasons.count(UNMAPPED_NO_FLAGS),
         "mapped": (ref.stats.get("mapped_employees"), ref.stats.get("employees")),
         "earlier_uploads": len(earlier_uploads),
         "first_uploaded_at": earlier_uploads[0]["created_at"] if earlier_uploads else None,
@@ -58,6 +60,10 @@ def preview_lines(p) -> list[str]:
     if p["duplicate_rows"]:
         lines.append(f"⚠️ {p['duplicate_rows']} repeated employee row(s) — the first row of each "
                      "CRM is used; the repeats are listed in Exceptions.")
+    if p.get("unmapped_no_flags"):
+        lines.append(f"⚠️ {p['unmapped_no_flags']} CRM(s) in the sheet are not in HC/Structure and "
+                     "have no flagged day — no case and no absence is recorded for them; they are "
+                     "listed in Exceptions as *not in HC/Structure (no flagged day)*.")
     if p["earlier_uploads"]:
         lines.append(f"⚠️ This exact file was already uploaded {p['earlier_uploads']} time(s) "
                      f"(first {p['first_uploaded_at']:%Y-%m-%d %H:%M}). Loading it again makes it "

@@ -4,7 +4,7 @@ import io
 
 import openpyxl
 
-from app.report import build_links_workbook, build_reconciled_report, reconcile
+from app.report import CHANGES_HEADER, build_links_workbook, build_reconciled_report, reconcile
 
 LABELS = {"absent": "Absent", "annual_leave": "Annual Leave", "present": "Present"}
 
@@ -140,7 +140,8 @@ def test_links_workbook_has_header_and_rows():
     data = build_links_workbook(rows)
     ws = openpyxl.load_workbook(io.BytesIO(data))["TL links"]
     r = list(ws.iter_rows(values_only=True))
-    assert r[0] == ("TL name", "CRM", "Email", "Open cases", "Link")
+    # changed on purpose (2026-10-16, option A): the column holds the reminder count
+    assert r[0] == ("TL name", "CRM", "Email", "Cases to remind", "Link")
     assert r[1] == ("Ahmed", "TL-A", "a@x.com", 3, "https://app/?t=abc")
 
 
@@ -224,3 +225,97 @@ def test_no_date_columns_raises(tmp_path):
         assert False, "expected ValueError"
     except ValueError:
         pass
+
+
+# ------------------------------------------------------------------ Phase 2: unresolved = Pending
+def _open(crm, day, source="Absent"):
+    return {"employee_crm": crm, "employee_name": crm, "manager_name": "TL", "work_date": day,
+            "source_status": source, "closed_by": None, "manager_comment": None}
+
+
+def test_unresolved_case_is_marked_pending_never_left_absent(tmp_path):
+    res = reconcile(_make_matrix(tmp_path), [], LABELS, year=2026,
+                    unresolved_cases=[_open("51sara", datetime.date(2026, 6, 16))])
+    wb = openpyxl.load_workbook(io.BytesIO(res.xlsx))
+    assert wb["Summary Report"].cell(row=3, column=4).value == "Pending"
+    rows = list(wb["Changes"].iter_rows(values_only=True))
+    assert rows[1][4] == "Pending" and rows[1][9] == "Yes — marked Pending (unresolved)"
+    assert (res.pending_marked, res.pending_not_marked, res.unresolved) == (1, 0, 1)
+    assert res.overwritten == 0                 # Pending is not a final verdict
+
+
+def test_unresolved_case_on_a_non_absent_cell_keeps_the_cell_and_is_listed(tmp_path):
+    res = reconcile(_make_matrix(tmp_path), [], LABELS, year=2026,
+                    unresolved_cases=[_open("51sara", datetime.date(2026, 6, 15))])
+    wb = openpyxl.load_workbook(io.BytesIO(res.xlsx))
+    assert wb["Summary Report"].cell(row=3, column=3).value == "Normal"
+    assert list(wb["Changes"].iter_rows(values_only=True))[1][9] == \
+        "No — unresolved; cell is not Absent"
+    assert (res.pending_marked, res.pending_not_marked) == (0, 1)
+
+
+def test_unresolved_case_not_in_the_workbook_is_listed_not_dropped(tmp_path):
+    res = reconcile(_make_matrix(tmp_path), [], LABELS, year=2026,
+                    unresolved_cases=[_open("51ghost", datetime.date(2026, 6, 15))])
+    rows = list(openpyxl.load_workbook(io.BytesIO(res.xlsx))["Changes"].iter_rows(values_only=True))
+    assert rows[1][0] == "51ghost" and rows[1][8] == "No" and rows[1][9] == "No — not in workbook"
+    assert res.unresolved == 1
+
+
+def test_unresolved_case_from_another_period_is_left_out(tmp_path):
+    res = reconcile(_make_matrix(tmp_path), [], LABELS, year=2026,
+                    unresolved_cases=[_open("51sara", datetime.date(2026, 7, 16))])
+    assert res.unresolved == 0
+    assert len(list(openpyxl.load_workbook(io.BytesIO(res.xlsx))["Changes"].iter_rows())) == 1
+
+
+def test_override_value_is_what_the_export_writes(tmp_path):
+    # list_closed_cases carries final_status, which an HRBP override sets: the export follows it
+    closed = [{**_closed()[0], "final_status": "present"}]
+    data = build_reconciled_report(_make_matrix(tmp_path), closed, LABELS, year=2026)
+    assert openpyxl.load_workbook(io.BytesIO(data))["Summary Report"].cell(row=2, column=3).value \
+        == "Present"
+
+
+def test_blank_cells_are_counted_as_missing_and_left_blank(tmp_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Summary Report"
+    ws.append(["CRM", "15-Jun", "16-Jun"])
+    ws.append(["51ahmed", None, "Absent"])
+    ws.append(["51sara", "  ", "Normal"])
+    p = tmp_path / "blanks.xlsx"
+    wb.save(p)
+    res = reconcile(str(p), [], LABELS, year=2026)
+    out = openpyxl.load_workbook(io.BytesIO(res.xlsx))["Summary Report"]
+    assert res.blank_cells == 2
+    assert out.cell(row=2, column=2).value is None      # never turned into Absent
+
+
+def test_sheet_names_and_matrix_layout_are_unchanged_by_pending(tmp_path):
+    src = _make_matrix(tmp_path)
+    res = reconcile(src, _closed(), LABELS, year=2026,
+                    unresolved_cases=[_open("51sara", datetime.date(2026, 6, 16))])
+    out = openpyxl.load_workbook(io.BytesIO(res.xlsx))
+    orig = openpyxl.load_workbook(src)["Summary Report"]
+    assert out.sheetnames == ["Summary Report", "Changes"]
+    m = out["Summary Report"]
+    assert (m.max_row, m.max_column) == (orig.max_row, orig.max_column)
+    assert [c.value for c in m[1]] == [c.value for c in orig[1]]
+
+
+def test_old_period_close_row_exports_as_pending_and_keeps_its_closed_by(tmp_path):
+    # an hrbp_cutoff case with no decision arrives through unresolved_cases (data.CASE_UNDECIDED):
+    # its Absent cell reads Pending, and the Changes row still says where it came from
+    cutoff = {**_open("51sara", datetime.date(2026, 6, 16)), "closed_by": "hrbp_cutoff"}
+    res = reconcile(_make_matrix(tmp_path), [], LABELS, year=2026, unresolved_cases=[cutoff])
+    wb = openpyxl.load_workbook(io.BytesIO(res.xlsx))
+    assert wb["Summary Report"].cell(row=3, column=4).value == "Pending"
+    row = list(wb["Changes"].iter_rows(values_only=True))[1]
+    assert (row[4], row[6]) == ("Pending", "hrbp_cutoff")
+    assert (res.unresolved, res.overwritten) == (1, 0)
+
+
+def test_changes_header_is_unchanged():
+    assert CHANGES_HEADER == ["CRM", "Employee", "Date", "Before", "After", "TL", "Closed by",
+                              "Comment", "In workbook?", "Overwritten?"]

@@ -196,7 +196,10 @@ def test_loader_records_range_hash_full_cells_and_stores_cells_last(sample_workb
     run_params = db.calls[0][2]
     assert run_params[1:3] == (D(2026, 5, 6), D(2026, 5, 8))          # range from the sheet
     assert run_params[-2:] == ("abc", True)                            # hash, full_cells
+    # Phase 2: the un-flag audit reads this upload's stored cells, so it must come after them
     assert [c[1] for c in db.calls[1:]] == [loader.AUDIT_SOURCE_CHANGE, loader.UPSERT_CASE,
-                                            loader.INSERT_EXCEPTION, loader.INSERT_DAY]
+                                            loader.INSERT_EXCEPTION, loader.INSERT_DAY,
+                                            loader.AUDIT_SOURCE_UNFLAGGED]
+    assert db.calls[5][2] == [{"actor": "ingest:system", "run_id": "run-1"}]
     day_rows = db.calls[4][2]
     assert len(day_rows) == len(res.cells) and all(r[0] == "run-1" for r in day_rows)

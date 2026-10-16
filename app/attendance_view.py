@@ -1,9 +1,9 @@
 """Read-only data contract for full attendance per Attendance Period (Phase 1).
 
-No UI and no final/effective status: each day carries its ingredients separately —
-Original Attendance (the active source cell), TL Response, HRBP Override, Pending/Flagged,
-Source Changed and Coverage — for the future TL full-attendance view (Phase 2/3 decide how they
-combine).
+Each day carries its ingredients separately — Original Attendance (the active source cell), TL
+Response, HRBP Override, Pending/Flagged, Source Changed and Coverage. HRBP rows also carry the
+Phase 2 effective status (app.effective: HRBP Override > TL Response > Original Attendance); TL
+rows never do (TL_ROW_FIELDS).
 
 tl_period_attendance  — TL-facing: the TL's team only; statuses are app.tl_labels labels (fail
                         closed: leave -> "Leave", unrecognised -> "Flagged — review required" or
@@ -15,6 +15,7 @@ reviewed before any TL full-attendance UI built on this contract is released.
 """
 from psycopg.rows import dict_row
 
+from app import effective
 from app.tl_labels import tl_status_label, tl_verdict_label
 from ingestion.periods import attendance_period, period_dates
 
@@ -90,13 +91,22 @@ def _grid(conn, ps, pe, team_sql, params):
         return [_derive(dict(r)) for r in cur.fetchall()]
 
 
+def _with_effective(r):
+    """The HRBP row plus effective_status / effective_source / needs_review (a new dict)."""
+    eff = effective.for_grid_row(r)
+    return {**r, "effective_status": eff.status, "effective_source": eff.source,
+            "needs_review": eff.needs_review}
+
+
 def hrbp_period_attendance(conn, period_start, manager_id=None):
     """Every employee (or one TL's team, by the TL team rule) x every day of the period, exact
-    values. HRBP-facing only."""
+    values plus the effective status. HRBP-facing only."""
     ps, pe = _period(period_start)
     if manager_id is None:
-        return _grid(conn, ps, pe, "select id from attendance.employees", {})
-    return _grid(conn, ps, pe, _TEAM_SQL, {"manager_id": manager_id})
+        rows = _grid(conn, ps, pe, "select id from attendance.employees", {})
+    else:
+        rows = _grid(conn, ps, pe, _TEAM_SQL, {"manager_id": manager_id})
+    return [_with_effective(r) for r in rows]
 
 
 # Exactly what a TL row carries, in order (the TL data-contract whitelist; tests assert it).

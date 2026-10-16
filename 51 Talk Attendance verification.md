@@ -43,7 +43,9 @@ link, and lets **HRBP** close or override before results merge back into payroll
    - Review each TL verdict → **Close as-is** or **Override & close** (override needs a reason).
 
 7. **Period close** (🔒 Period close tab) — *only when everything is verified.*
-   - Stands every remaining open case as **Absent**. **Irreversible.**
+   - Records the cut-off. Every case still undecided stays **open** and reads **Pending** (or
+     **Review required**) — it is **never** turned into Absent. TLs can still answer; decide the
+     rest with an HRBP Override.
 
 8. **Export for payroll** (📤 Export tab)
    - Re-upload the period's attendance workbook → **Build reconciled report**.
@@ -72,8 +74,11 @@ link, and lets **HRBP** close or override before results merge back into payroll
    **invalidates any link already sent**. Distribute once per round; don't re-prepare/re-email
    after sending, or the links in inboxes stop working.
 
-3. **"Close the period" is irreversible.**
-   It stands **every** remaining open case as **Absent**. Only click when everything is verified.
+3. **"Close the period" decides nothing.**
+   Every case still undecided stays open and reads **Pending** (or **Review required**) — never
+   Absent. After a close, an upload whose cases are still open can no longer be removed. Cases the
+   *old* close stored as Absent (before 2026-10) also read Pending; only an HRBP Override decides
+   them, because they don't appear on the TL link.
 
 4. **Set the correct Year on ingest.**
    Date columns are parsed with the Year you pick. Wrong year → wrong dates on every case.

@@ -9,6 +9,12 @@ verification cases, produce a two-sheet .xlsx returned as bytes:
   * "Changes" — one row per closed case dated within the workbook's period: CRM, Employee, Date, Before, After, TL, Closed by, Comment,
     In workbook?, Overwritten?.
 
+Phase 2: a case nobody has decided yet (open / responded, or closed only by the old period-close
+default — data.CASE_UNDECIDED) is never left reading Absent. Its cell,
+if still Absent / No Show, is written as "Pending", and it gets a Changes row with After =
+"Pending" — so an unresolved day can't be paid as an absence by accident. The sheets, columns and
+layout are unchanged; the counts (pending, blank cells) are for the HRBP warning before download.
+
 Matching mirrors ingestion exactly (case-insensitive CRM key, same date-header parsing), so a cell
 verified during ingestion maps back to the same cell here.
 """
@@ -29,6 +35,9 @@ CHANGES_HEADER = ["CRM", "Employee", "Date", "Before", "After", "TL", "Closed by
 OVERWRITTEN = "Yes"
 SKIPPED_NOT_ABSENT = "No — cell is not Absent"
 SKIPPED_NOT_IN_WORKBOOK = "No — not in workbook"
+PENDING_LABEL = "Pending"
+MARKED_PENDING = "Yes — marked Pending (unresolved)"
+PENDING_NOT_MARKED = "No — unresolved; cell is not Absent"
 
 
 def is_overwritable(cell_value) -> bool:
@@ -42,7 +51,8 @@ def is_overwritable(cell_value) -> bool:
     return _base(normalize(cell_value)) in TRIGGER_EXACT
 
 
-LINKS_HEADER = ["TL name", "CRM", "Email", "Open cases", "Link"]
+# The count column holds the reminder count (app.reminders), not every open case on the link.
+LINKS_HEADER = ["TL name", "CRM", "Email", "Cases to remind", "Link"]
 
 
 def _locate_header(ws):
@@ -65,6 +75,13 @@ class ReconcileResult(NamedTuple):
     skipped_not_absent: int  # cell held something else (a leave, Normal...) and was kept
     not_in_workbook: int     # inside the period, but no row / column for it in this file
     other_period: int        # outside this file's dates — left out of the Changes sheet
+    pending_marked: int = 0      # unresolved case: its Absent / No Show cell now reads Pending
+    pending_not_marked: int = 0  # unresolved case whose cell isn't Absent, or isn't in the file
+    blank_cells: int = 0         # empty matrix cells (CRM rows x date columns): left blank, Missing
+
+    @property
+    def unresolved(self) -> int:
+        return self.pending_marked + self.pending_not_marked
 
 
 def _period_label(dates) -> str:
@@ -96,12 +113,20 @@ def _matrix_index(ws, year):
     return date_cols, row_by_key
 
 
+def _blank_cells(ws, date_cols, row_by_key) -> int:
+    return sum(1 for r in row_by_key.values() for c in date_cols.values()
+               if ws.cell(row=r, column=c).value is None
+               or str(ws.cell(row=r, column=c).value).strip() == "")
+
+
 def reconcile(matrix, closed_cases, labels, year, sheet=MATRIX_SHEET_HINT,
-              staff_gaps=None) -> ReconcileResult:
+              staff_gaps=None, unresolved_cases=()) -> ReconcileResult:
     """matrix: a path or a binary file-like object (e.g. a Streamlit upload).
     closed_cases: iterable of dicts with keys employee_crm, employee_name, manager_name,
     work_date (date), source_status, final_status (verdict code), closed_by, manager_comment.
     labels: {verdict_code: human_label}.
+
+    unresolved_cases: undecided cases (data.list_unresolved_cases), marked Pending.
 
     Only cases dated within the workbook's own date columns are reconciled: closed cases
     accumulate across periods, and an older or later case has no business in this file."""
@@ -112,6 +137,7 @@ def reconcile(matrix, closed_cases, labels, year, sheet=MATRIX_SHEET_HINT,
         ws = wb[wb.sheetnames[0]]
     date_cols, row_by_key = _matrix_index(ws, year)
     first, last = min(date_cols), max(date_cols)
+    blank_cells = _blank_cells(ws, date_cols, row_by_key)   # before any write
 
     counts = {OVERWRITTEN: 0, SKIPPED_NOT_ABSENT: 0, SKIPPED_NOT_IN_WORKBOOK: 0}
     other_period = 0
@@ -148,6 +174,25 @@ def reconcile(matrix, closed_cases, labels, year, sheet=MATRIX_SHEET_HINT,
             outcome,
         ])
 
+    marked = not_marked = 0
+    for cs in unresolved_cases:
+        wd = cs.get("work_date")
+        if wd is None or not first <= wd <= last:
+            continue
+        row = row_by_key.get(_key(_clean(cs.get("employee_crm"))))
+        col = date_cols.get(wd)
+        in_workbook = row is not None and col is not None
+        if in_workbook and is_overwritable(ws.cell(row=row, column=col).value):
+            ws.cell(row=row, column=col).value = PENDING_LABEL
+            outcome, marked = MARKED_PENDING, marked + 1
+        else:
+            outcome = PENDING_NOT_MARKED if in_workbook else SKIPPED_NOT_IN_WORKBOOK
+            not_marked += 1
+        ch.append([cs.get("employee_crm"), cs.get("employee_name"), wd.isoformat(),
+                   cs.get("source_status"), PENDING_LABEL, cs.get("manager_name"),
+                   cs.get("closed_by"),             # None while open; 'hrbp_cutoff' on old closes
+                   cs.get("manager_comment"), "Yes" if in_workbook else "No", outcome])
+
     if staff_gaps:  # HC/Structure completeness gaps — staff not producing verifiable cases
         sg = wb.create_sheet("Staff not in Attendance")
         sg.append(["CRM", "Reason", "Detail"])
@@ -163,6 +208,9 @@ def reconcile(matrix, closed_cases, labels, year, sheet=MATRIX_SHEET_HINT,
         skipped_not_absent=counts[SKIPPED_NOT_ABSENT],
         not_in_workbook=counts[SKIPPED_NOT_IN_WORKBOOK],
         other_period=other_period,
+        pending_marked=marked,
+        pending_not_marked=not_marked,
+        blank_cells=blank_cells,
     )
 
 
