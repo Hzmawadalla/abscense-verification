@@ -368,6 +368,18 @@ CASE_UNFLAGGED_NOW = (
 
 PERIOD_CLOSE_ACTION = "period_close_pending"
 
+# A case left open by a period close (alias `c`): it carries a 'period_close_pending' audit entry
+# that no later HRBP void ('hrbp_void') has superseded. The action string alone is the signal —
+# only close_open_month writes it — so the note's contents are never parsed. A void after the close
+# hands the case back to its TL on purpose, so the case counts as current again. Used to keep these
+# cases out of the TL reminders (decision 2026-10-16, option A); it never changes the case.
+CASE_PERIOD_CLOSED = (
+    "exists (select 1 from attendance.audit_log n "
+    "        where n.case_id = c.id and n.action = 'period_close_pending' "
+    "          and not exists (select 1 from attendance.audit_log v "
+    "                          where v.case_id = c.id and v.action = 'hrbp_void' "
+    "                            and v.created_at > n.created_at))")
+
 
 def close_open_month(conn, actor) -> dict:
     """Period close (SPEC §6.5): records the cut-off and reports what is still undecided. It never
@@ -376,7 +388,8 @@ def close_open_month(conn, actor) -> dict:
     answer and HRBP can still decide it. No case field changes; each still-open case gets one
     'period_close_pending' audit entry (its status at the first cut-off it was open at), so the
     history shows it was still unresolved when the period closed. Pressing Close again reports the
-    same counts and writes no second entry. (No row lock: a TL answering during the close may
+    same counts and writes no second entry (unless HRBP voided the case since, which makes it
+    current again — see CASE_PERIOD_CLOSED). (No row lock: a TL answering during the close may
     leave a note that says pending for a case that closed a moment later — the answer wins.)
 
     Returns {'pending': n, 'kept_for_review': n} (still flagged / no longer flagged)."""
@@ -384,10 +397,9 @@ def close_open_month(conn, actor) -> dict:
         cur.execute(
             "select c.id, c.status, c.source_status, "
             f"       {CASE_UNFLAGGED_NOW} as unflagged, "
-            "       exists (select 1 from attendance.audit_log l where l.case_id = c.id "
-            "               and l.action = %s) as noted "
+            f"       {CASE_PERIOD_CLOSED} as noted "
             "from attendance.cases c where c.status in ('open','manager_responded') "
-            "order by c.id", (PERIOD_CLOSE_ACTION,))
+            "order by c.id")
         rows = cur.fetchall()
         for cid, status, source_status, unflagged, noted in rows:
             if noted:
@@ -467,12 +479,19 @@ def set_dingtalk_ids(conn, mapping) -> int:
 
 
 def managers_overview(conn):
-    """Each active TL with their open-case count, DingTalk userid, and whether a link exists."""
+    """Each active TL with their open-case count, DingTalk userid, and whether a link exists.
+
+    open_cases = every case on the TL's link. remind_cases = the ones a reminder is about: open
+    cases NOT left open by a period close (CASE_PERIOD_CLOSED). Every reminder count, recipient
+    list and preview uses remind_cases (app.reminders); the cases themselves stay open on the TL
+    link and for HRBP."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "select m.id, m.crm, m.name, m.email, m.dingtalk_userid, "
             "       (m.access_token_hash is not null) as has_link, "
-            "       count(c.id) filter (where c.status in ('open','manager_responded')) as open_cases "
+            "       count(c.id) filter (where c.status in ('open','manager_responded')) as open_cases, "
+            "       count(c.id) filter (where c.status in ('open','manager_responded') "
+            f"                          and not {CASE_PERIOD_CLOSED}) as remind_cases "
             "from attendance.managers m "
             "left join attendance.cases c on c.manager_id = m.id "
             "where m.active group by m.id order by open_cases desc, m.name")

@@ -15,7 +15,7 @@ import os
 
 import streamlit as st
 
-from app import data, export_gate, ingest_flow
+from app import data, export_gate, ingest_flow, reminders
 from app.dingtalk import DingTalkClient
 from app.mailer import SMTPMailer
 from app.report import build_links_workbook, reconcile
@@ -592,11 +592,15 @@ def render_hrbp():
             st.info("📧 Email not configured. Add SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASSWORD / "
                     "MAIL_FROM to Secrets (e.g. Brevo's SMTP relay) to enable one-click email sending.")
         overview = data.managers_overview(c)
-        emailable = [m for m in overview if m["open_cases"] and m.get("email")]
-        no_email = [m for m in overview if m["open_cases"] and not m.get("email")]
+        targets = reminders.reminder_targets(overview)    # one rule for counts and recipients
+        emailable, no_email = targets["email"], targets["no_email"]
+        held = sum(m["open_cases"] - reminders.remind_count(m) for m in overview)
+        if held:
+            st.caption(f"ℹ️ {held} open case(s) were left open by a period close: they stay on the "
+                       "TL links and on the Dashboard, but reminders below don't count or chase them.")
 
         bulk = st.columns(2)
-        if mailer and bulk[0].button(f"📧 Email links to all TLs with open cases ({len(emailable)})",
+        if mailer and bulk[0].button(f"📧 Email links to all TLs with cases to remind ({len(emailable)})",
                                      type="primary", disabled=not emailable):
             sent = fail = 0
             try:
@@ -617,22 +621,21 @@ def render_hrbp():
         dt_armed = client is not None and bulk[1].checkbox(
             "Enable DingTalk sending", key="dt_armed",
             help="Off by default. Tick this to arm the bulk DingTalk send, then press the button.")
-        if client and bulk[1].button("📨 DingTalk to all TLs with open cases",
-                                     disabled=not dt_armed):
+        if client and bulk[1].button(f"📨 DingTalk to all TLs with cases to remind "
+                                     f"({len(targets['dingtalk'])})", disabled=not dt_armed):
             sent = fail = 0
-            for mgr in overview:
-                if mgr["dingtalk_userid"] and mgr["open_cases"]:
-                    ok, _ = send_tl_link(c, client, mgr, base)
-                    sent += ok
-                    fail += (not ok)
+            for mgr in targets["dingtalk"]:
+                ok, _ = send_tl_link(c, client, mgr, base)
+                sent += ok
+                fail += (not ok)
             st.success(f"DingTalk: sent {sent}, failed {fail}.")
         if no_email:
-            st.caption(f"⚠️ {len(no_email)} TL with open cases have no email on file — use their **Link** "
+            st.caption(f"⚠️ {len(no_email)} TL with cases to remind have no email on file — use their **Link** "
                        "button to copy and send manually.")
 
         # Bulk download for manual distribution (mail-merge / copy) — no email or DingTalk needed.
-        with_open = [m for m in overview if m["open_cases"]]
-        if st.button(f"⬇️ Prepare all TL links for download ({len(with_open)} with open cases)",
+        with_open = targets["links"]
+        if st.button(f"⬇️ Prepare all TL links for download ({len(with_open)} with cases to remind)",
                      disabled=not with_open):
             link_rows = []
             for mgr in with_open:
@@ -652,13 +655,15 @@ def render_hrbp():
         for mgr in overview:
             cols = st.columns([4, 1, 1, 1, 3])
             email = mgr.get("email") or "— no email —"
-            cols[0].write(f"**{mgr['name'] or mgr['crm']}** · {mgr['open_cases']} open · {email}")
+            due = reminders.remind_count(mgr)
+            cols[0].write(f"**{mgr['name'] or mgr['crm']}** · {mgr['open_cases']} open "
+                          f"({due} to remind) · {email}")
             if cols[1].button("Link", key=f"gl{mgr['id']}"):
                 tok = data.generate_manager_link(c, mgr["id"])
                 st.session_state[f"link{mgr['id']}"] = f"{base}/?t={tok}"
-            can_email = bool(mailer and mgr.get("email") and mgr["open_cases"])
+            can_email = bool(mailer and mgr.get("email") and due)
             if cols[2].button("Email", key=f"eml{mgr['id']}", disabled=not can_email):
-                ok, err = send_tl_email(c, mailer, mgr, base)
+                ok, err = send_tl_email(c, mailer, reminders.with_remind_count(mgr), base)
                 st.success(f"Emailed {mgr['name']}.") if ok else st.error(f"Failed: {err}")
             # Rotate is the ONLY action that invalidates an existing link — gated by a confirm box.
             confirm = cols[3].checkbox("↻?", key=f"rotok{mgr['id']}",

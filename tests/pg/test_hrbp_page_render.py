@@ -164,3 +164,36 @@ def test_undecided_filter_lists_old_cutoff_rows_as_pending(conn, pg_dsn, seed, m
     table = at.dataframe[0].value
     assert list(table["effective_status"]) == ["Pending"]
     assert list(table["final_status"]) == ["absent"]                  # stored value still shown
+
+
+def test_tl_links_tab_does_not_count_cases_left_open_by_a_close(conn, pg_dsn, seed, monkeypatch):
+    # No sender can run: SMTP / DingTalk settings are absent (no send buttons are drawn), and any
+    # non-loopback connection fails the test.
+    import socket
+    real = socket.socket.connect
+
+    def guarded(sock, address):
+        host = address[0] if isinstance(address, tuple) else address
+        assert host in ("127.0.0.1", "::1", "localhost"), f"tried to reach {host!r}"
+        return real(sock, address)
+    monkeypatch.setattr(socket.socket, "connect", guarded)
+    for var in ("DINGTALK_APP_KEY", "DINGTALK_APP_SECRET", "DINGTALK_AGENT_ID", "SMTP_USER",
+                "SMTP_PASSWORD", "MAIL_FROM"):
+        monkeypatch.delenv(var, raising=False)
+    day, later = D(2026, 9, 20), D(2026, 9, 21)
+    _load(conn, [_cell("E-1", day, "Absent", "trigger")], [CaseCandidate("E-1", "TL-A", day, "Absent")])
+    data.close_open_month(conn, "hrbp:test")
+    _load(conn, [_cell("E-1", later, "Absent", "trigger")],
+          [CaseCandidate("E-1", "TL-A", later, "Absent")])
+    at = _signed_in_app(conn, pg_dsn, monkeypatch)
+    at.run()
+    assert not at.exception, at.exception
+    shown = _text(at)
+    assert "1 open case(s) were left open by a period close" in shown
+    assert "· 2 open (1 to remind) ·" in shown
+    labels = [b.label for b in at.button]
+    assert not any(l.startswith(("📧 Email links", "📨 DingTalk")) for l in labels)
+    assert "⬇️ Prepare all TL links for download (1 with cases to remind)" in labels
+    with conn.cursor() as cur:
+        cur.execute("select count(*) from attendance.notifications")
+        assert cur.fetchone()[0] == 0
