@@ -51,3 +51,53 @@ def test_rendered_tl_page_contains_labels_only(conn, pg_dsn, seed, monkeypatch):
     for word in ("Hospital", "Surgery", "Bereavement", "Annual", "Failed", "Pending",
                  "To Be Confirmed", "check"):
         assert word not in shown
+
+
+def _render(pg_dsn, token):
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(str(REPO / "streamlit_app.py"), default_timeout=60)
+    at.secrets["SUPABASE_DB_URL"] = pg_dsn
+    at.query_params["t"] = token
+    at.run()
+    assert not at.exception, at.exception
+    return at
+
+
+def _all_text(at):
+    return "\n".join([m.value for m in at.markdown] + [m.value for m in at.caption]
+                     + [m.value for m in at.error] + [m.value for m in at.warning]
+                     + [m.value for m in at.info] + [m.value for m in at.success]
+                     + [m.value for m in at.title])
+
+
+def test_expired_invalid_signed_and_legacy_links_on_the_tl_page(conn, pg_dsn, seed, monkeypatch):
+    # Phase 3 PR A: an expired or invalid link shows ONE fixed sentence and nothing about the TL,
+    # team or cases; a valid signed or legacy link still opens the case page.
+    import datetime
+    from cryptography.fernet import Fernet
+    from app import data, tl_links
+    for var in ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("TOKEN_ENC_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("SUPABASE_DB_URL", pg_dsn)
+    assert "127.0.0.1" in pg_dsn
+    seed["new_case"](seed["new_run"](), datetime.date(2026, 10, 1))
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    expired = data.rotate_manager_link(conn, seed["manager_id"], now - datetime.timedelta(days=61),
+                                       signed=True)
+    at = _render(pg_dsn, expired)
+    assert [e.value for e in at.error] == [tl_links.EXPIRED_MESSAGE]
+    assert "Lead A" not in _all_text(at) and "Emp One" not in _all_text(at)
+
+    for bad in (expired[:-2] + "xx", "v1.not.a.link", "nope"):
+        at = _render(pg_dsn, bad)
+        assert [e.value for e in at.error] == [tl_links.INVALID_MESSAGE]
+        assert "Lead A" not in _all_text(at)
+
+    signed = data.rotate_manager_link(conn, seed["manager_id"], now, signed=True)
+    assert "Lead A" in _all_text(_render(pg_dsn, signed))
+    legacy = data.rotate_manager_link(conn, seed["manager_id"], now, signed=False)
+    assert "Lead A" in _all_text(_render(pg_dsn, legacy))
+    at = _render(pg_dsn, signed)                                      # revoked by the rotation
+    assert [e.value for e in at.error] == [tl_links.INVALID_MESSAGE]
