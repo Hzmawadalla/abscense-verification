@@ -121,7 +121,9 @@ def issue_manager_link(conn, manager_id, now=None, signed=None) -> tuple[str, bo
             cur.execute("select access_token_enc, access_token_hash from attendance.managers "
                         "where id = %s", (manager_id,))
             row = cur.fetchone()
-            existing = security.decrypt_token(row[0]) if row and row[0] else None
+            if row is None:
+                raise LookupError("no such TL")
+            existing = security.decrypt_token(row[0]) if row[0] else None
             kind = security.check_link(existing, now).kind if existing else None
             if kind == security.LINK_LEGACY and tl_links.legacy_sunset_passed(security._utc(now)):
                 kind = security.LINK_EXPIRED
@@ -131,7 +133,7 @@ def issue_manager_link(conn, manager_id, now=None, signed=None) -> tuple[str, bo
             cur.execute("update attendance.managers set access_token_enc = %s, access_token_hash = %s "
                         "where id = %s and access_token_hash is not distinct from %s",
                         (security.encrypt_token(token), security.hash_token(token), manager_id,
-                         row[1] if row else None))
+                         row[1]))
             stored = cur.rowcount == 1
         conn.commit()
         if stored:

@@ -123,3 +123,9 @@ def test_a_concurrent_reissue_keeps_the_other_sessions_link():
     tok, new = data.issue_manager_link(conn, "m1")
     assert (tok, new) == (theirs, False)                # ours lost the race and returns theirs
     assert conn.store["m1"]["access_token_hash"] == security.hash_token(theirs)
+
+
+def test_issuing_for_an_unknown_tl_fails_clearly():
+    import pytest
+    with pytest.raises(LookupError):
+        data.issue_manager_link(FakeConn({}), "nobody")
