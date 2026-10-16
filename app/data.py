@@ -72,8 +72,7 @@ def tl_access(conn, token, now=None) -> TLAccess:
     an invalid or expired link reveals nothing. Then the stored hash must match an active manager:
     a rotated (revoked) link is 'invalid'. Never widens access on failure."""
     check = security.check_link(token, now)
-    if check.kind == security.LINK_LEGACY and tl_links.LEGACY_LINK_SUNSET is not None \
-            and security._utc(now) >= tl_links.LEGACY_LINK_SUNSET:
+    if check.kind == security.LINK_LEGACY and tl_links.legacy_sunset_passed(security._utc(now)):
         return _DENIED[security.LINK_EXPIRED]
     if check.kind in _DENIED:
         return _DENIED[check.kind]
@@ -110,21 +109,34 @@ def issue_manager_link(conn, manager_id, now=None, signed=None) -> tuple[str, bo
     - an unexpired signed link is returned unchanged (stable across copy / email / download);
     - an EXPIRED signed link is replaced by a fresh signed link (approved re-send routine);
     - a legacy link is returned unchanged until the cutover (tl_links.ISSUE_SIGNED_LINKS), and
-      replaced by a signed link after it;
-    - no stored link, or one that can't be read, gets a new one of the current kind.
+      replaced by a signed link after it or once the legacy sunset has passed;
+    - no stored link, or one that can't be read or has an unexpected shape (e.g. TOKEN_ENC_KEY
+      changed), gets a new one of the current kind.
+    The write only replaces the link that was read (compare-and-set on the stored hash): when two
+    HRBP sessions re-send at once, the second one gets the first one's new link, not a third.
     The stored token is encrypted (key in app secrets, not the DB)."""
     signed = tl_links.ISSUE_SIGNED_LINKS if signed is None else signed
-    with conn.cursor() as cur:
-        cur.execute("select access_token_enc from attendance.managers where id = %s", (manager_id,))
-        row = cur.fetchone()
-        existing = security.decrypt_token(row[0]) if row and row[0] else None
-        kind = security.check_link(existing, now).kind if existing else None
-        if kind == security.LINK_SIGNED or (kind == security.LINK_LEGACY and not signed):
-            return existing, False
-        token = _mint(signed or kind == security.LINK_EXPIRED, now)
-        _store_link(cur, manager_id, token)
-    conn.commit()
-    return token, True
+    for _ in range(3):
+        with conn.cursor() as cur:
+            cur.execute("select access_token_enc, access_token_hash from attendance.managers "
+                        "where id = %s", (manager_id,))
+            row = cur.fetchone()
+            existing = security.decrypt_token(row[0]) if row and row[0] else None
+            kind = security.check_link(existing, now).kind if existing else None
+            if kind == security.LINK_LEGACY and tl_links.legacy_sunset_passed(security._utc(now)):
+                kind = security.LINK_EXPIRED
+            if kind == security.LINK_SIGNED or (kind == security.LINK_LEGACY and not signed):
+                return existing, False
+            token = _mint(signed or kind == security.LINK_EXPIRED, now)
+            cur.execute("update attendance.managers set access_token_enc = %s, access_token_hash = %s "
+                        "where id = %s and access_token_hash is not distinct from %s",
+                        (security.encrypt_token(token), security.hash_token(token), manager_id,
+                         row[1] if row else None))
+            stored = cur.rowcount == 1
+        conn.commit()
+        if stored:
+            return token, True
+    raise RuntimeError("TL link changed concurrently; try again")
 
 
 def generate_manager_link(conn, manager_id, now=None) -> str:

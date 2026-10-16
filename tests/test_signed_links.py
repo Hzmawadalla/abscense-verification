@@ -129,3 +129,21 @@ def test_the_signing_key_is_derived_never_the_encryption_key_itself(key):
     assert len(derived) == 32 and derived != raw
     assert derived not in (raw[:16] * 2, raw[16:] * 2)
     assert s._signing_key() == derived                    # deterministic for the same key
+
+
+def test_an_out_of_range_but_validly_signed_issue_time_is_invalid_not_a_crash():
+    rand = _parts(s.mint_signed_token(T0))[1]
+    for iat in (999_999_999_999, 253_402_300_799):            # past year 9999 / at its edge
+        assert s.check_link(_resign(rand, iat), T0).kind == s.LINK_INVALID
+
+
+def test_the_link_policy_refuses_an_inconsistent_cutover():
+    from app import tl_links
+    tl_links.validate_policy(False, None)
+    tl_links.validate_policy(True, None)
+    tl_links.validate_policy(True, T0)
+    with pytest.raises(ValueError):
+        tl_links.validate_policy(True, dt.datetime(2026, 11, 1))          # naive
+    with pytest.raises(ValueError):
+        tl_links.validate_policy(False, T0)                               # sunset before signing
+    assert (tl_links.ISSUE_SIGNED_LINKS, tl_links.LEGACY_LINK_SUNSET) == (False, None)

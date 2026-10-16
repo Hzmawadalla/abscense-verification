@@ -23,3 +23,22 @@ SCOPE_CASE_ONLY = "case_only"
 
 EXPIRED_MESSAGE = "Link expired — ask your HRBP for a new link."
 INVALID_MESSAGE = "This link isn't valid — ask your HRBP for a new link."
+
+
+def validate_policy(issue_signed, sunset) -> None:
+    """Refuse an inconsistent cutover commit at import time instead of failing on a TL's click:
+    the sunset must be an aware UTC datetime, and it needs signed links to be issued already
+    (otherwise a re-send would hand out a legacy link that reads "expired")."""
+    if sunset is None:
+        return
+    if not isinstance(sunset, dt.datetime) or sunset.tzinfo is None:
+        raise ValueError("LEGACY_LINK_SUNSET must be a timezone-aware datetime (UTC)")
+    if not issue_signed:
+        raise ValueError("LEGACY_LINK_SUNSET needs ISSUE_SIGNED_LINKS = True")
+
+
+def legacy_sunset_passed(now) -> bool:
+    return LEGACY_LINK_SUNSET is not None and now >= LEGACY_LINK_SUNSET
+
+
+validate_policy(ISSUE_SIGNED_LINKS, LEGACY_LINK_SUNSET)

@@ -140,8 +140,11 @@ def check_link(token, now=None) -> LinkCheck:
         body = token.rsplit(".", 1)[0]
         if not hmac.compare_digest(_signature(key, body), m.group(3)):
             return LinkCheck(LINK_INVALID)
-        issued = dt.datetime.fromtimestamp(int(m.group(2)), dt.timezone.utc)
-        expires = issued + LINK_LIFETIME
+        try:
+            issued = dt.datetime.fromtimestamp(int(m.group(2)), dt.timezone.utc)
+            expires = issued + LINK_LIFETIME
+        except (OverflowError, OSError, ValueError):
+            return LinkCheck(LINK_INVALID)
         now = _utc(now)
         if issued > now + MAX_CLOCK_SKEW:
             return LinkCheck(LINK_INVALID)

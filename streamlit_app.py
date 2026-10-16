@@ -678,8 +678,11 @@ def render_hrbp():
             cols[0].write(f"**{mgr['name'] or mgr['crm']}** · {mgr['open_cases']} open "
                           f"({due} to remind) · {email}")
             if cols[1].button("Link", key=f"gl{mgr['id']}"):
-                tok = data.generate_manager_link(c, mgr["id"])
+                tok, new = data.issue_manager_link(c, mgr["id"])
                 st.session_state[f"link{mgr['id']}"] = f"{base}/?t={tok}"
+                if new:
+                    st.warning(f"A new link was issued for {mgr['name'] or mgr['crm']} — the "
+                               "previous link stopped working.")
             can_email = bool(mailer and mgr.get("email") and due)
             if cols[2].button("Email", key=f"eml{mgr['id']}", disabled=not can_email):
                 ok, err, _ = send_tl_email(c, mailer, reminders.with_remind_count(mgr), base)

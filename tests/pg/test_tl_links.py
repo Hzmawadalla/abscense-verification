@@ -141,3 +141,14 @@ def test_failed_checks_never_reach_the_database_or_the_logs(conn, tls, caplog):
                         ("v1.garbage", "invalid"), ("", "invalid")]:
         assert data.tl_access(NoDB(), bad, T0 + 61 * DAY).status == status
     assert not any(rand in r.getMessage() for r in caplog.records)
+
+
+def test_after_the_sunset_a_resend_replaces_the_legacy_link(conn, tls, monkeypatch):
+    legacy = data.rotate_manager_link(conn, tls["TL-A"], T0, signed=False)
+    monkeypatch.setattr(tl_links, "ISSUE_SIGNED_LINKS", True)
+    monkeypatch.setattr(tl_links, "LEGACY_LINK_SUNSET", T0 + 10 * DAY)
+    assert data.issue_manager_link(conn, tls["TL-A"], T0 + 9 * DAY)[1] is True    # cutover itself
+    data.rotate_manager_link(conn, tls["TL-B"], T0, signed=False)
+    new, issued = data.issue_manager_link(conn, tls["TL-B"], T0 + 11 * DAY, signed=False)
+    assert issued and security.check_link(new, T0 + 11 * DAY).kind == security.LINK_SIGNED
+    assert data.tl_access(conn, legacy, T0 + 11 * DAY).status != "ok"
