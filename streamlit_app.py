@@ -15,7 +15,7 @@ import os
 
 import streamlit as st
 
-from app import data, ingest_flow
+from app import data, export_gate, ingest_flow
 from app.dingtalk import DingTalkClient
 from app.mailer import SMTPMailer
 from app.report import build_links_workbook, reconcile
@@ -25,6 +25,7 @@ from app.storage import StorageClient, object_path, validate_upload
 from app.tl_labels import tl_case_line, tl_done_line
 from app.verdicts import (HRBP_OVERRIDE_VERDICTS, PROOF_REQUIRED, VERDICT_LABEL, VERDICTS,
                           blocked_cases, is_blocked, unanswered, verdict_choices)
+from app.effective import UNRESOLVED_STATES
 from app.version import build_stamp
 from ingestion.config import load_aliases, load_dingtalk_ids
 from ingestion.reference import parse_reference_any
@@ -344,11 +345,15 @@ def render_hrbp():
         m[1].metric("Responded", counts.get("manager_responded", 0))
         m[2].metric("Closed", counts.get("closed", 0))
         status_filter = st.selectbox("Show", ["manager_responded", "open", "closed", "(all)",
-                                              "(needs review)"])
-        listed = None if status_filter in ("(all)", "(needs review)") else status_filter
+                                              "(needs review)", "(undecided)"],
+                                     help="(undecided) = Pending or Review required, including "
+                                          "cases the old period close stored as Absent.")
+        listed = None if status_filter.startswith("(") else status_filter
         rows = data.list_cases(c, status=listed)
         if status_filter == "(needs review)":
             rows = [r for r in rows if r["needs_review"]]
+        elif status_filter == "(undecided)":
+            rows = [r for r in rows if r["effective_status"] in UNRESOLVED_STATES]
         review_n = sum(1 for r in rows if r["needs_review"])
         if review_n:
             st.warning(f"⚠️ {review_n} case(s) shown need HRBP review: a newer upload changed or no "
@@ -698,34 +703,35 @@ def render_hrbp():
                         st.rerun()
 
     with tab_close:
-        st.error("⚠️ **DANGER — this is NOT a 'save' or 'process' button.** It permanently closes "
-                 "**every** open case as **Absent** and **cannot be undone**. Use it only at the very "
-                 "end of the cycle, once every case has been verified. Cases whose day the newest "
-                 "upload no longer flags are left open for review.")
+        st.warning("**Period close records the cut-off — it decides nothing.** Every case still "
+                   "undecided stays **open** and reads **Pending** (or **Review required** when the "
+                   "newest upload no longer flags its day). Nothing is turned into Absent. TLs can "
+                   "still answer on their link, and you can still decide any case with an HRBP "
+                   "Override. Each still-open case gets a note in its history.")
+        st.caption("Expect Pending cells in the payroll export for anything still undecided.")
         typed = st.text_input("To confirm, type the word  CLOSE  in capitals:")
         if st.button("Close the period now", type="primary", disabled=(typed.strip() != "CLOSE")):
             res = data.close_open_month(c, actor)
-            st.success(f"Closed {res['closed']} open case(s) as Absent.")
-            if res["kept_for_review"]:
-                st.warning(f"{res['kept_for_review']} open case(s) were NOT closed: the newest "
-                           "upload no longer flags their day. Decide them with an HRBP Override "
-                           "(Dashboard → (needs review)).")
+            total = res["pending"] + res["kept_for_review"]
+            if not total:
+                st.success("Period closed — no undecided case left.")
+            else:
+                st.warning(f"Period closed — **{total}** case(s) are still undecided and stay "
+                           f"open: **{res['pending']}** Pending, **{res['kept_for_review']}** "
+                           "Review required (the newest upload no longer flags the day). None was "
+                           "set to Absent. Decide them on the Dashboard with an HRBP Override.")
 
     with tab_export:
-        st.write("Re-upload this period's attendance workbook to get it back with every **closed** "
-                 "case updated to its final verdict, plus a **Changes** sheet of before → after.")
+        st.write("Re-upload this period's attendance workbook to get it back with every **decided** "
+                 "case updated to its final verdict, plus a **Changes** sheet of before → after. "
+                 "Undecided cases read **Pending**, never Absent.")
         exp_up = st.file_uploader("Attendance report — Summary Report tab (.xlsx)",
                                   type=["xlsx"], key="exp_wb")
         exp_year = st.number_input("Year for the date columns", 2024, 2100, 2026, key="exp_year", help="Year of the FIRST date column; a 15-Dec → 14-Jan sheet rolls into the next year automatically.")
         exp_key = (hashlib.sha256(exp_up.getvalue()).hexdigest(), int(exp_year)) if exp_up else None
-        built = st.session_state.get("reconciled")
-        if built and built["key"] != exp_key:          # file or year changed: stale report
-            st.session_state.pop("reconciled", None)
-            st.session_state.pop("reconcile_ack", None)
-            built = None
+        built = export_gate.current(st.session_state, exp_key)   # file or year changed: reset
         if exp_up and st.button("Build reconciled report", type="primary"):
-            st.session_state.pop("reconciled", None)
-            st.session_state.pop("reconcile_ack", None)   # every new report needs a fresh tick
+            export_gate.reset(st.session_state)      # every new report needs a fresh tick
             built = None
             closed = data.list_closed_cases(c)
             unresolved = data.list_unresolved_cases(c)
@@ -741,20 +747,20 @@ def render_hrbp():
                              "the **Summary Report** tab, and check the Year.")
                 else:
                     built = {"key": exp_key, "result": result}
-                    st.session_state["reconciled"] = built
+                    st.session_state[export_gate.BUILT_KEY] = built
         if built:
             result = built["result"]
             _show_reconcile_summary(result)
             st.caption("The report reflects the cases at the moment it was built — build it "
                        "again after deciding more cases.")
-            needs_ack = bool(result.unresolved or result.not_in_workbook)   # blanks: info only
-            ack = (not needs_ack) or st.checkbox(
+            ticked = export_gate.needs_ack(result) and st.checkbox(   # blanks: info only
                 "I have read the warnings above: Pending and Missing days are NOT absences and "
-                "must be resolved before payroll.", key="reconcile_ack")
+                "must be resolved before payroll.", key=export_gate.ACK_KEY)
             st.download_button("⬇️ Download reconciled report", data=result.xlsx,
                                file_name=f"Attendance_Reconciled_{result.period}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument."
-                                    "spreadsheetml.sheet", disabled=not ack)
+                                    "spreadsheetml.sheet",
+                               disabled=not export_gate.download_enabled(result, ticked))
 
     with tab_uploads:
         st.write("Every attendance upload and its cases. Remove a bad upload, or clear everything to "

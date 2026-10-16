@@ -9,7 +9,8 @@ verification cases, produce a two-sheet .xlsx returned as bytes:
   * "Changes" — one row per closed case dated within the workbook's period: CRM, Employee, Date, Before, After, TL, Closed by, Comment,
     In workbook?, Overwritten?.
 
-Phase 2: a case nobody has decided yet (open / responded) is never left reading Absent. Its cell,
+Phase 2: a case nobody has decided yet (open / responded, or closed only by the old period-close
+default — data.CASE_UNDECIDED) is never left reading Absent. Its cell,
 if still Absent / No Show, is written as "Pending", and it gets a Changes row with After =
 "Pending" — so an unresolved day can't be paid as an absence by accident. The sheets, columns and
 layout are unchanged; the counts (pending, blank cells) are for the HRBP warning before download.
@@ -124,7 +125,7 @@ def reconcile(matrix, closed_cases, labels, year, sheet=MATRIX_SHEET_HINT,
     work_date (date), source_status, final_status (verdict code), closed_by, manager_comment.
     labels: {verdict_code: human_label}.
 
-    unresolved_cases: open / responded cases (data.list_unresolved_cases), marked Pending.
+    unresolved_cases: undecided cases (data.list_unresolved_cases), marked Pending.
 
     Only cases dated within the workbook's own date columns are reconciled: closed cases
     accumulate across periods, and an older or later case has no business in this file."""
@@ -187,7 +188,8 @@ def reconcile(matrix, closed_cases, labels, year, sheet=MATRIX_SHEET_HINT,
             outcome = PENDING_NOT_MARKED if in_workbook else SKIPPED_NOT_IN_WORKBOOK
             not_marked += 1
         ch.append([cs.get("employee_crm"), cs.get("employee_name"), wd.isoformat(),
-                   cs.get("source_status"), PENDING_LABEL, cs.get("manager_name"), None,
+                   cs.get("source_status"), PENDING_LABEL, cs.get("manager_name"),
+                   cs.get("closed_by"),             # None while open; 'hrbp_cutoff' on old closes
                    cs.get("manager_comment"), "Yes" if in_workbook else "No", outcome])
 
     if staff_gaps:  # HC/Structure completeness gaps — staff not producing verifiable cases

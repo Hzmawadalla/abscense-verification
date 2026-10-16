@@ -40,10 +40,12 @@ def test_hrbp_accepting_the_tl_answer_is_still_the_tl_answer():
 
 
 def test_a_final_status_without_override_timestamp_is_not_an_override():
-    # final_status alone (e.g. the period close) must never be read as an HRBP override
+    # final_status alone (e.g. the old period close) must never be read as an HRBP override.
+    # Changed on purpose (2026-10-16): the old cutoff's stored Absent was a default, so it now
+    # reads Pending instead of Absent (decision: unresolved stays Pending at period close).
     e = effective_status(case_status="closed", final_status="absent", closed_by="hrbp_cutoff",
                          active_bucket="trigger")
-    assert (e.status, e.source) == ("Absent", "hrbp_cutoff")
+    assert (e.status, e.source) == (PENDING, SOURCE_CASE)
 
 
 # ------------------------------------------------------------------ unresolved
@@ -148,16 +150,61 @@ def test_grid_row_adapter_uses_the_grid_column_names():
     assert eff.for_grid_row(r).status == REVIEW_REQUIRED
 
 
+# ------------------------------------------------------------------ old period close (hrbp_cutoff)
+# Changed on purpose (2026-10-16): these two used to expect the stored "Absent" (source
+# hrbp_cutoff). The old period close's Absent was a default, not a decision, so it now reads
+# Pending / Review required. The stored final_status itself is never rewritten.
 def test_period_closed_case_on_a_day_no_longer_flagged_still_needs_review():
     e = effective_status(case_status="closed", final_status="absent", closed_by="hrbp_cutoff",
                          active_bucket="skip", active_status="Normal")
-    assert (e.status, e.source, e.needs_review) == ("Absent", "hrbp_cutoff", True)
+    assert (e.status, e.source, e.needs_review) == (REVIEW_REQUIRED, SOURCE_CASE, True)
 
 
 def test_period_closed_case_still_flagged_needs_no_review():
     e = effective_status(case_status="closed", final_status="absent", closed_by="hrbp_cutoff",
                          active_bucket="trigger", active_status="Absent")
-    assert e.needs_review is False
+    assert (e.status, e.needs_review) == (PENDING, False)
+
+
+def test_old_cutoff_case_without_any_stored_cell_is_pending():
+    e = effective_status(case_status="closed", final_status="absent", closed_by="hrbp_cutoff")
+    assert (e.status, e.source) == (PENDING, SOURCE_CASE)
+
+
+def test_old_cutoff_case_with_a_tl_answer_shows_the_tl_answer():
+    # TL Response beats the cutoff's default Absent
+    e = effective_status(case_status="closed", tl_answer="present", final_status="absent",
+                         closed_by="hrbp_cutoff", active_bucket="trigger")
+    assert (e.status, e.source) == ("Present", SOURCE_TL)
+
+
+def test_old_cutoff_case_later_overridden_shows_the_override():
+    e = effective_status(case_status="closed", final_status="sick_leave", closed_by="hrbp",
+                         hrbp_override_at=AT, active_bucket="trigger")
+    assert (e.status, e.source) == ("Sick Leave", SOURCE_OVERRIDE)
+
+
+def test_explicit_absent_decisions_stay_absent():
+    by_tl = effective_status(case_status="closed", tl_answer="absent", final_status="absent",
+                             closed_by="tl", active_bucket="trigger")
+    by_hrbp = effective_status(case_status="closed", final_status="absent", closed_by="hrbp",
+                               hrbp_override_at=AT, active_bucket="trigger")
+    assert (by_tl.status, by_tl.source) == ("Absent", SOURCE_TL)
+    assert (by_hrbp.status, by_hrbp.source) == ("Absent", SOURCE_OVERRIDE)
+
+
+@pytest.mark.parametrize("kw,undecided", [
+    (dict(case_status="open"), True),
+    (dict(case_status="manager_responded"), True),
+    (dict(case_status="closed", closed_by="hrbp_cutoff"), True),
+    (dict(case_status="closed", closed_by="hrbp_cutoff", tl_answer="absent"), False),
+    (dict(case_status="closed", closed_by="hrbp_cutoff", hrbp_override_at=AT), False),
+    (dict(case_status="closed", closed_by="tl", tl_answer="absent"), False),
+    (dict(case_status="closed", closed_by="hrbp", hrbp_override_at=AT), False),
+])
+def test_is_undecided(kw, undecided):
+    args = {"case_status": None, "closed_by": None, "tl_answer": None, "hrbp_override_at": None}
+    assert eff.is_undecided(**{**args, **kw}) is undecided
 
 
 @pytest.mark.parametrize("bucket", ["unknown", "ignore"])

@@ -257,9 +257,19 @@ new_value jsonb, created_at`. JSONB field-level diffs; indexed on `case_id`.
 
 ### 6.5 Period close (HRBP-managed, manual — no scheduler)
 Cutoff timing is managed by HRBP, not the system. When HRBP decides the period is closing, a
-dashboard action closes all remaining `open` cases in the range → `closed`,
-`final_status = absent`, `closed_by = 'hrbp_cutoff'`. Optionally, HRBP first exports the list of
-still-open cases to nudge TLs. No Scheduled Function; no SM escalation.
+dashboard action (typed `CLOSE` confirmation) records the cut-off and reports what is still
+undecided. **It decides nothing:** every remaining `open` / `manager_responded` case stays as it
+is, with no `final_status`, and reads **Pending** — or **Review required** when the newest upload
+no longer flags its day. Unresolved is never turned into Absent. Each such case gets one
+`period_close_pending` audit entry; no case field changes. A TL can still answer on their link and
+HRBP can still decide any case with an HRBP Override. The payroll export shows undecided cases as
+Pending (§6.6). Optionally, HRBP first exports the list of still-open cases to nudge TLs. No
+Scheduled Function; no SM escalation.
+
+*Before 2026-10 this action closed the remaining cases with `final_status = absent`,
+`closed_by = 'hrbp_cutoff'`. Those stored values are kept as history, but a `hrbp_cutoff` case with
+no TL answer and no HRBP override is treated as undecided everywhere — Pending on screen, in the
+unresolved count and in the export — because its Absent was a default, not a decision.*
 
 ### 6.6 Report merge
 Dashboard export: date range → CSV/Excel of `employee · work_date · source_status · final_status

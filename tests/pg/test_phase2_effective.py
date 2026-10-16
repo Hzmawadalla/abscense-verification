@@ -8,7 +8,7 @@ from psycopg.rows import dict_row
 
 from app import data
 from app.attendance_view import TL_ROW_FIELDS, hrbp_period_attendance, tl_period_attendance
-from app.effective import BLANK, MISSING, PENDING, REVIEW_REQUIRED
+from app.effective import BLANK, MISSING, PENDING, REVIEW_REQUIRED, UNRESOLVED_STATES
 from ingestion import loader
 from ingestion.db_psycopg import PsycopgDB
 from ingestion.summary import (UNMAPPED_NO_FLAGS, UNMAPPED_NO_FLAGS_DETAIL, AttendanceCell,
@@ -299,26 +299,160 @@ def test_unresolved_cases_feed_the_export_and_closed_ones_do_not(conn, org):
     assert set(unresolved[0]) >= {"employee_crm", "work_date", "source_status"}
 
 
-# ------------------------------------------------------------------ period close (review fix H1)
-def test_period_close_never_closes_a_no_longer_flagged_day_as_absent(conn, org):
+# ------------------------------------------------------------------ period close (2026-10-16)
+# Changed on purpose: the period close used to set final_status = 'absent' (closed_by
+# 'hrbp_cutoff') on every still-flagged open case. Decision 2026-10-16: unresolved stays Pending,
+# so the close now changes no case field and only records the cut-off.
+def _case_fields(row):
+    keep = ("status", "manager_status", "final_status", "closed_by", "closed_at", "leave_type",
+            "manager_comment", "manager_responded_at", "hrbp_override_at", "source_status")
+    return {k: row[k] for k in keep}
+
+
+def test_period_close_leaves_unresolved_cases_open_with_no_final_status(conn, org):
     _load(conn, [_cell("E-1", DAY, "Absent", "trigger"), _cell("E-2", DAY, "Absent", "trigger")],
           [_flag("E-1", DAY), _flag("E-2", DAY)], name="a")
     _load(conn, [_cell("E-2", DAY, None, "blank")], name="b")         # E-2's day now blank
+    before = {crm: _case_fields(_case(conn, crm)) for crm in ("E-1", "E-2")}
     res = data.close_open_month(conn, "hrbp:x")
-    assert res == {"closed": 1, "kept_for_review": 1}
-    e1, e2 = _case(conn, "E-1"), _case(conn, "E-2")
-    assert (e1["status"], e1["final_status"], e1["closed_by"]) == ("closed", "absent", "hrbp_cutoff")
-    assert (e2["status"], e2["final_status"]) == ("open", None)
+    assert res == {"pending": 1, "kept_for_review": 1}
+    for crm in ("E-1", "E-2"):
+        assert _case_fields(_case(conn, crm)) == before[crm]            # nothing on the case moved
+        assert _case(conn, crm)["status"] == "open" and _case(conn, crm)["final_status"] is None
+    assert _grid_row(conn, "E-1")["effective_status"] == PENDING
     assert _grid_row(conn, "E-2")["effective_status"] == REVIEW_REQUIRED
-    assert len(_audit(conn, e1["id"], "auto_close_absent")) == 1
-    assert _audit(conn, e2["id"], "auto_close_absent") == []
+    assert _audit(conn, _case(conn, "E-1")["id"], "auto_close_absent") == []
+    e1_note = _audit(conn, _case(conn, "E-1")["id"], data.PERIOD_CLOSE_ACTION)
+    e2_note = _audit(conn, _case(conn, "E-2")["id"], data.PERIOD_CLOSE_ACTION)
+    assert [n["new_value"]["effective"] for n in e1_note + e2_note] == ["pending", "review_required"]
+    assert e1_note[0]["new_value"]["final_status"] is None
+
+
+def test_period_close_never_produces_absent_anywhere(conn, org):
+    _load(conn, [_cell("E-1", DAY, "Absent", "trigger")], [_flag("E-1", DAY)])
+    data.close_open_month(conn, "hrbp:x")
+    assert [r["employee_crm"] for r in data.list_unresolved_cases(conn)] == ["E-1"]
+    assert data.list_closed_cases(conn) == []
+    assert [r["effective_status"] for r in data.list_cases(conn)] == [PENDING]
+
+
+def test_period_close_keeps_history_audit_and_evidence(conn, org):
+    _load(conn, [_cell("E-1", DAY, "Absent", "trigger")], [_flag("E-1", DAY)], name="a")
+    cid = _case(conn, "E-1")["id"]
+    _answer(conn, cid, "present")
+    _attach(conn, cid)
+    data.reopen_tl_cases(conn, [cid], "hrbp:x", "wrong screenshot")    # voided answer, kept
+    audit_before = _q(conn, "select id, action from attendance.audit_log where case_id = %s "
+                            "order by created_at", (cid,))
+    data.close_open_month(conn, "hrbp:x")
+    audit_after = _q(conn, "select id, action from attendance.audit_log where case_id = %s "
+                           "order by created_at", (cid,))
+    assert audit_after[:len(audit_before)] == audit_before             # append-only
+    assert [a["action"] for a in audit_after[len(audit_before):]] == [data.PERIOD_CLOSE_ACTION]
+    assert len(data.list_attachments(conn, cid, include_voided=True)) == 1
 
 
 def test_period_close_leaves_decided_cases_alone(conn, org):
+    _load(conn, [_cell("E-1", DAY, "Absent", "trigger"), _cell("E-2", DAY, "Absent", "trigger")],
+          [_flag("E-1", DAY), _flag("E-2", DAY)])
+    _answer(conn, _case(conn, "E-1")["id"], "absent")                  # an explicit Absent
+    data.close_case(conn, _case(conn, "E-2")["id"], "hrbp:x", final_status="annual_leave",
+                    comment="approved")
+    before = {crm: _case_fields(_case(conn, crm)) for crm in ("E-1", "E-2")}
+    assert data.close_open_month(conn, "hrbp:x") == {"pending": 0, "kept_for_review": 0}
+    assert {crm: _case_fields(_case(conn, crm)) for crm in ("E-1", "E-2")} == before
+    assert _grid_row(conn, "E-1")["effective_status"] == "Absent"     # explicit Absent stays
+    assert [(r["employee_crm"], r["final_status"]) for r in data.list_closed_cases(conn)] == \
+        [("E-1", "absent"), ("E-2", "annual_leave")]
+
+
+def test_tl_can_still_answer_after_the_period_close(conn, org):
     _load(conn, [_cell("E-1", DAY, "Absent", "trigger")], [_flag("E-1", DAY)])
+    data.close_open_month(conn, "hrbp:x")
+    tl_a = _q(conn, "select * from attendance.managers where crm = 'TL-A'")[0]
+    assert [r["employee_crm"] for r in data.tl_cases_for_manager(conn, tl_a)] == ["E-1"]
     _answer(conn, _case(conn, "E-1")["id"], "present")
-    assert data.close_open_month(conn, "hrbp:x") == {"closed": 0, "kept_for_review": 0}
-    assert _case(conn, "E-1")["final_status"] == "present"
+    assert _grid_row(conn, "E-1")["effective_status"] == "Present"
+
+
+def test_close_sends_nothing_and_reminder_counts_follow_the_existing_manual_model(conn, org):
+    # There is no scheduler: reminders are HRBP's manual Email / DingTalk sends to "TLs with open
+    # cases" (data.managers_overview). The close sends nothing itself, and a case left open by it
+    # is still counted for its TL - no closed-period marker exists to tell it apart (PR notes).
+    _load(conn, [_cell("E-1", DAY, "Absent", "trigger")], [_flag("E-1", DAY)])
+    data.close_open_month(conn, "hrbp:x")
+    assert _q(conn, "select count(*) as n from attendance.notifications")[0]["n"] == 0
+    by_tl = {m["crm"]: m["open_cases"] for m in data.managers_overview(conn)}
+    assert by_tl == {"TL-A": 1, "TL-B": 0}
+
+
+# ------------------------------------------------------------------ historical hrbp_cutoff rows
+def _old_cutoff(conn, crm, manager_status=None):
+    """A row as the pre-2026-10 period close left it: closed, final_status absent, hrbp_cutoff."""
+    _q(conn, "update attendance.cases c set status = 'closed', final_status = 'absent', "
+             "manager_status = %s, closed_by = 'hrbp_cutoff', closed_at = now() "
+             "from attendance.employees e where e.id = c.employee_id and e.crm = %s",
+       (manager_status, crm))
+    return _case(conn, crm)
+
+
+def test_old_cutoff_absent_reads_pending_everywhere_and_is_not_rewritten(conn, org):
+    _load(conn, [_cell("E-1", DAY, "Absent", "trigger")], [_flag("E-1", DAY)])
+    stored = _case_fields(_old_cutoff(conn, "E-1"))
+    row = data.list_cases(conn)[0]
+    assert (row["final_status"], row["closed_by"]) == ("absent", "hrbp_cutoff")   # stored, shown
+    assert (row["effective_status"], row["effective_source"]) == (PENDING, "case")
+    assert _grid_row(conn, "E-1")["effective_status"] == PENDING
+    unresolved = data.list_unresolved_cases(conn)
+    assert [(r["employee_crm"], r["closed_by"]) for r in unresolved] == [("E-1", "hrbp_cutoff")]
+    assert data.list_closed_cases(conn) == []                          # never exported as Absent
+    data.close_open_month(conn, "hrbp:x")
+    assert _case_fields(_case(conn, "E-1")) == stored                  # history kept as stored
+
+
+def test_old_cutoff_on_a_no_longer_flagged_day_is_review_required(conn, org):
+    _load(conn, [_cell("E-1", DAY, "Absent", "trigger")], [_flag("E-1", DAY)], name="a")
+    _old_cutoff(conn, "E-1")
+    _load(conn, [_cell("E-1", DAY, "Normal", "skip")], name="b")
+    row = data.list_cases(conn)[0]
+    assert (row["effective_status"], row["needs_review"]) == (REVIEW_REQUIRED, True)
+
+
+def test_old_cutoff_with_a_tl_answer_exports_the_tl_answer(conn, org):
+    _load(conn, [_cell("E-1", DAY, "Absent", "trigger")], [_flag("E-1", DAY)])
+    _old_cutoff(conn, "E-1", manager_status="present")
+    assert data.list_unresolved_cases(conn) == []
+    assert [(r["employee_crm"], r["final_status"]) for r in data.list_closed_cases(conn)] == \
+        [("E-1", "present")]
+    assert data.list_cases(conn)[0]["effective_status"] == "Present"
+
+
+def test_hrbp_override_decides_an_old_cutoff_case(conn, org):
+    _load(conn, [_cell("E-1", DAY, "Absent", "trigger")], [_flag("E-1", DAY)])
+    cid = _old_cutoff(conn, "E-1")["id"]
+    assert data.close_case(conn, cid, "hrbp:x", final_status="absent", comment="confirmed")
+    assert data.list_unresolved_cases(conn) == []
+    assert [(r["final_status"], r["closed_by"]) for r in data.list_closed_cases(conn)] == \
+        [("absent", "hrbp")]
+    row = data.list_cases(conn)[0]
+    assert (row["effective_status"], row["effective_source"]) == ("Absent", "hrbp_override")
+
+
+def test_sql_and_python_agree_on_what_is_undecided(conn, org):
+    # data.CASE_UNDECIDED (export) and app.effective.is_undecided (screen) must never drift apart
+    days = [DAY + datetime.timedelta(days=i) for i in range(5)]
+    _load(conn, [_cell("E-1", d, "Absent", "trigger") for d in days],
+          [_flag("E-1", d) for d in days])
+    ids = [_case(conn, "E-1", d)["id"] for d in days]
+    _answer(conn, ids[1], "absent")                                      # TL decided
+    data.close_case(conn, ids[2], "hrbp:x", final_status="present", comment="ok")   # override
+    _q(conn, "update attendance.cases set status = 'closed', final_status = 'absent', "
+             "closed_by = 'hrbp_cutoff' where id = any(%s)", ([ids[3], ids[4]],))
+    _q(conn, "update attendance.cases set manager_status = 'present' where id = %s", (ids[4],))
+    sql = {r["work_date"] for r in data.list_unresolved_cases(conn)}
+    py = {r["work_date"] for r in data.list_cases(conn)
+          if r["effective_status"] in UNRESOLVED_STATES}
+    assert sql == py == {days[0], days[3]}
 
 
 # ------------------------------------------------------------------ D4 goes away once mapped

@@ -261,9 +261,20 @@ def _with_effective(r):
             "needs_review": eff.needs_review}
 
 
+# A case nobody has decided (alias `c`): still open, or closed only by the old period close
+# (closed_by 'hrbp_cutoff', no TL answer, no override), whose stored Absent was a default. SQL twin
+# of app.effective.is_undecided: the screen, the unresolved list and the export use the same rule.
+# (An open-state row carrying a TL answer can't occur today: submit_verdict closes the case.)
+CASE_UNDECIDED = (
+    "(c.status in ('open', 'manager_responded') "
+    " or (c.closed_by = 'hrbp_cutoff' and c.manager_status is null "
+    "     and c.hrbp_override_at is null))")
+
+
 def list_unresolved_cases(conn):
-    """Cases nobody has decided yet (open / responded), shaped like list_closed_cases rows: the
-    reconciled export marks them Pending instead of leaving the workbook's Absent standing."""
+    """Undecided cases (CASE_UNDECIDED), shaped like list_closed_cases rows: the reconciled export
+    marks them Pending instead of leaving the workbook's Absent standing. closed_by stays as
+    stored ('hrbp_cutoff' on an old period-close row), so the Changes sheet shows where it came from."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "select e.crm as employee_crm, e.name as employee_name, m.name as manager_name, "
@@ -271,21 +282,29 @@ def list_unresolved_cases(conn):
             "from attendance.cases c "
             "join attendance.employees e on e.id = c.employee_id "
             "left join attendance.managers m on m.id = c.manager_id "
-            "where c.status in ('open', 'manager_responded') "
+            f"where {CASE_UNDECIDED} "
             "order by e.crm, c.work_date")
         return cur.fetchall()
 
 
 def list_closed_cases(conn):
-    """Finalized cases (for the reconciled export): CRM x date x source -> final verdict."""
+    """Decided cases (for the reconciled export): CRM x date x source -> final verdict.
+
+    An old period-close row without any decision is left out (it is undecided, see
+    list_unresolved_cases). One that does carry a TL answer exports that answer: TL Response beats
+    the cutoff's default, exactly as app.effective shows it."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "select e.crm as employee_crm, e.name as employee_name, m.name as manager_name, "
-            "       c.work_date, c.source_status, c.final_status, c.closed_by, c.manager_comment "
+            "       c.work_date, c.source_status, "
+            "       case when c.closed_by = 'hrbp_cutoff' and c.hrbp_override_at is null "
+            "            then c.manager_status else c.final_status end as final_status, "
+            "       c.closed_by, c.manager_comment "
             "from attendance.cases c "
             "join attendance.employees e on e.id = c.employee_id "
             "left join attendance.managers m on m.id = c.manager_id "
             "where c.status = 'closed' and c.final_status is not null "
+            f"  and not {CASE_UNDECIDED} "
             "order by e.crm, c.work_date")
         return cur.fetchall()
 
@@ -341,26 +360,33 @@ CASE_UNFLAGGED_NOW = (
     "        where e.id = c.employee_id and a.work_date = c.work_date and a.bucket <> 'trigger')")
 
 
-def close_open_month(conn, actor) -> dict:
-    """Period close: stand every remaining open case as Absent (SPEC §6.5) — EXCEPT a case whose
-    day the newest upload no longer flags (Phase 2): that one stays open for an HRBP decision, so a
-    day the source now calls Normal (or leaves blank) is never closed as Absent by default.
+PERIOD_CLOSE_ACTION = "period_close_pending"
 
-    Returns {'closed': n, 'kept_for_review': n}."""
+
+def close_open_month(conn, actor) -> dict:
+    """Period close (SPEC §6.5): records the cut-off and reports what is still undecided. It never
+    decides anything: every open case stays open with no final_status — Pending while its day is
+    still flagged, Review required when the newest upload no longer flags it — so a TL can still
+    answer and HRBP can still decide it. No case field changes; each still-open case gets one
+    'period_close_pending' audit entry (its status at the cut-off), so the history shows it was
+    still unresolved when the period closed.
+
+    Returns {'pending': n, 'kept_for_review': n} (still flagged / no longer flagged)."""
     with conn.cursor() as cur:
         cur.execute(
-            "update attendance.cases c set status = 'closed', final_status = 'absent', "
-            "closed_by = 'hrbp_cutoff', closed_at = now() "
-            f"where c.status in ('open','manager_responded') and not {CASE_UNFLAGGED_NOW} "
-            "returning c.id")
-        ids = [r[0] for r in cur.fetchall()]
-        for cid in ids:
-            _audit(cur, cid, actor, "auto_close_absent", None, {"final_status": "absent"})
-        cur.execute("select count(*) from attendance.cases c "
-                    f"where c.status in ('open','manager_responded') and {CASE_UNFLAGGED_NOW}")
-        kept = cur.fetchone()[0]
+            "select c.id, c.status, c.source_status, "
+            f"       {CASE_UNFLAGGED_NOW} as unflagged "
+            "from attendance.cases c where c.status in ('open','manager_responded') "
+            "order by c.id")
+        rows = cur.fetchall()
+        for cid, status, source_status, unflagged in rows:
+            _audit(cur, cid, actor, PERIOD_CLOSE_ACTION,
+                   {"status": status, "source_status": source_status},
+                   {"status": status, "final_status": None,
+                    "effective": "review_required" if unflagged else "pending"})
     conn.commit()
-    return {"closed": len(ids), "kept_for_review": kept}
+    kept = sum(1 for r in rows if r[3])
+    return {"pending": len(rows) - kept, "kept_for_review": kept}
 
 
 # D4 (ingestion.summary.UNMAPPED_NO_FLAGS): recorded per upload with work_date null so HRBP sees

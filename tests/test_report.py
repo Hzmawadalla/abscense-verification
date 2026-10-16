@@ -4,7 +4,7 @@ import io
 
 import openpyxl
 
-from app.report import build_links_workbook, build_reconciled_report, reconcile
+from app.report import CHANGES_HEADER, build_links_workbook, build_reconciled_report, reconcile
 
 LABELS = {"absent": "Absent", "annual_leave": "Annual Leave", "present": "Present"}
 
@@ -301,3 +301,20 @@ def test_sheet_names_and_matrix_layout_are_unchanged_by_pending(tmp_path):
     m = out["Summary Report"]
     assert (m.max_row, m.max_column) == (orig.max_row, orig.max_column)
     assert [c.value for c in m[1]] == [c.value for c in orig[1]]
+
+
+def test_old_period_close_row_exports_as_pending_and_keeps_its_closed_by(tmp_path):
+    # an hrbp_cutoff case with no decision arrives through unresolved_cases (data.CASE_UNDECIDED):
+    # its Absent cell reads Pending, and the Changes row still says where it came from
+    cutoff = {**_open("51sara", datetime.date(2026, 6, 16)), "closed_by": "hrbp_cutoff"}
+    res = reconcile(_make_matrix(tmp_path), [], LABELS, year=2026, unresolved_cases=[cutoff])
+    wb = openpyxl.load_workbook(io.BytesIO(res.xlsx))
+    assert wb["Summary Report"].cell(row=3, column=4).value == "Pending"
+    row = list(wb["Changes"].iter_rows(values_only=True))[1]
+    assert (row[4], row[6]) == ("Pending", "hrbp_cutoff")
+    assert (res.unresolved, res.overwritten) == (1, 0)
+
+
+def test_changes_header_is_unchanged():
+    assert CHANGES_HEADER == ["CRM", "Employee", "Date", "Before", "After", "TL", "Closed by",
+                              "Comment", "In workbook?", "Overwritten?"]

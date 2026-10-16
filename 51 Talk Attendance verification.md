@@ -43,7 +43,9 @@ link, and lets **HRBP** close or override before results merge back into payroll
    - Review each TL verdict → **Close as-is** or **Override & close** (override needs a reason).
 
 7. **Period close** (🔒 Period close tab) — *only when everything is verified.*
-   - Stands every remaining open case as **Absent**. **Irreversible.**
+   - Records the cut-off. Every case still undecided stays **open** and reads **Pending** (or
+     **Review required**) — it is **never** turned into Absent. TLs can still answer; decide the
+     rest with an HRBP Override.
 
 8. **Export for payroll** (📤 Export tab)
    - Re-upload the period's attendance workbook → **Build reconciled report**.

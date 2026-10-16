@@ -80,7 +80,8 @@ def test_hrbp_dashboard_shows_layers_review_and_d4(conn, pg_dsn, seed, monkeypat
     assert "127.0.0.1" in pg_dsn                                      # local cluster only
     with conn.cursor() as cur:                                        # the page needs one HRBP row
         cur.execute("insert into attendance.hrbp_users (email, name, password_hash, active) "
-                    "values ('hrbp@test.invalid', 'Test HRBP', 'not-a-hash', true)")
+                    "values ('hrbp@test.invalid', 'Test HRBP', 'not-a-hash', true) "
+                    "on conflict (email) do nothing")
     conn.commit()
     day, moved = D(2026, 9, 20), D(2026, 9, 21)
     _load(conn, [_cell("E-1", day, "Absent", "trigger"), _cell("E-1", moved, "Absent", "trigger")],
@@ -106,3 +107,60 @@ def test_hrbp_dashboard_shows_layers_review_and_d4(conn, pg_dsn, seed, monkeypat
     assert {"effective_status", "needs_review", "source_status", "active_raw",
             "manager_status"} <= set(table.columns)
     assert sorted(table["effective_status"]) == ["Pending", "Review required"]
+
+
+def _signed_in_app(conn, pg_dsn, monkeypatch):
+    from streamlit.testing.v1 import AppTest
+    for var in ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "TOKEN_ENC_KEY", "SMTP_HOST"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setitem(sys.modules, "streamlit_authenticator", _fake_authenticator())
+    assert "127.0.0.1" in pg_dsn                                      # local cluster only
+    with conn.cursor() as cur:
+        cur.execute("insert into attendance.hrbp_users (email, name, password_hash, active) "
+                    "values ('hrbp@test.invalid', 'Test HRBP', 'not-a-hash', true) "
+                    "on conflict (email) do nothing")      # the fixture keeps reference tables
+    conn.commit()
+    at = AppTest.from_file(str(REPO / "streamlit_app.py"), default_timeout=60)
+    at.secrets["SUPABASE_DB_URL"] = pg_dsn
+    return at
+
+
+def test_period_close_tab_keeps_cases_open_and_reports_pending(conn, pg_dsn, seed, monkeypatch):
+    day, moved = D(2026, 9, 20), D(2026, 9, 21)
+    _load(conn, [_cell("E-1", day, "Absent", "trigger"), _cell("E-1", moved, "Absent", "trigger")],
+          [CaseCandidate("E-1", "TL-A", day, "Absent"), CaseCandidate("E-1", "TL-A", moved, "Absent")])
+    _load(conn, [_cell("E-1", moved, "Normal", "skip")])              # newer upload clears one
+    at = _signed_in_app(conn, pg_dsn, monkeypatch)
+    at.run()
+    assert not at.exception, at.exception
+    assert "it decides nothing" in _text(at)
+    close_btn = next(b for b in at.button if b.label == "Close the period now")
+    assert close_btn.disabled                                         # typed confirmation kept
+    next(t for t in at.text_input if "CLOSE" in t.label).set_value("CLOSE")
+    at.run()
+    next(b for b in at.button if b.label == "Close the period now").click()
+    at.run()
+    assert not at.exception, at.exception
+    shown = _text(at)
+    assert "**2** case(s) are still undecided" in shown
+    assert "**1** Pending, **1** Review required" in shown and "None was set to Absent" in shown
+    with conn.cursor() as cur:
+        cur.execute("select status, final_status from attendance.cases order by work_date")
+        assert cur.fetchall() == [("open", None), ("open", None)]
+
+
+def test_undecided_filter_lists_old_cutoff_rows_as_pending(conn, pg_dsn, seed, monkeypatch):
+    day = D(2026, 9, 20)
+    _load(conn, [_cell("E-1", day, "Absent", "trigger")], [CaseCandidate("E-1", "TL-A", day, "Absent")])
+    with conn.cursor() as cur:                                        # as the old close left it
+        cur.execute("update attendance.cases set status = 'closed', final_status = 'absent', "
+                    "closed_by = 'hrbp_cutoff', closed_at = now()")
+    conn.commit()
+    at = _signed_in_app(conn, pg_dsn, monkeypatch)
+    at.run()
+    at.selectbox[0].set_value("(undecided)")
+    at.run()
+    assert not at.exception, at.exception
+    table = at.dataframe[0].value
+    assert list(table["effective_status"]) == ["Pending"]
+    assert list(table["final_status"]) == ["absent"]                  # stored value still shown

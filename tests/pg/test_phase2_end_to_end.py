@@ -167,6 +167,22 @@ def test_reconciled_export_reflects_effective_status_and_marks_pending(conn, flo
     assert flagged == result.overwritten + result.unresolved
 
 
+
+def test_export_after_the_period_close_is_unchanged_and_still_pending(conn, flow):
+    # the close decides nothing, so the export built after it is identical, Pending included
+    def build():
+        r = reconcile(io.BytesIO(flow["second"].read_bytes()), data.list_closed_cases(conn),
+                      VERDICT_LABEL, year=2026, staff_gaps=data.list_reference_gaps(conn),
+                      unresolved_cases=data.list_unresolved_cases(conn))
+        ws = openpyxl.load_workbook(io.BytesIO(r.xlsx))["Summary Report"]
+        return r._replace(xlsx=b""), [row for row in ws.iter_rows(values_only=True)]
+    before = build()
+    res = data.close_open_month(conn, "hrbp:test")
+    assert res["pending"] + res["kept_for_review"] == before[0].unresolved
+    after = build()
+    assert after == before
+    assert after[0].unresolved == 2 and after[0].pending_marked == 1
+
 def test_tl_view_stays_case_only_and_label_only(conn, flow):
     mgr = _manager(conn, "TL-A")
     rows = data.tl_cases_for_manager(conn, mgr)
