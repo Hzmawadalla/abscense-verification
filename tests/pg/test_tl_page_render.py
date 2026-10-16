@@ -101,3 +101,51 @@ def test_expired_invalid_signed_and_legacy_links_on_the_tl_page(conn, pg_dsn, se
     assert "Lead A" in _all_text(_render(pg_dsn, legacy))
     at = _render(pg_dsn, signed)                                      # revoked by the rotation
     assert [e.value for e in at.error] == [tl_links.INVALID_MESSAGE]
+
+
+def test_team_tab_only_for_a_signed_link_and_shows_the_matrix(conn, pg_dsn, seed, monkeypatch):
+    # Phase 3 PR C: a signed link gets the read-only team tab; a legacy link gets the case page only
+    import datetime
+    from cryptography.fernet import Fernet
+    from app import data, tl_matrix
+    for var in ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("TOKEN_ENC_KEY", Fernet.generate_key().decode())
+    assert "127.0.0.1" in pg_dsn
+    period = tl_matrix.period_options(tl_matrix.business_today(), n=2)[1]   # a finished period
+    seed["new_case"](seed["new_run"](), period, "Hospital visit - check")
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    legacy = data.rotate_manager_link(conn, seed["manager_id"], now, signed=False)
+    at = _render(pg_dsn, legacy)
+    assert len(at.tabs) == 0 and "Lead A" in _all_text(at)
+
+    signed = data.rotate_manager_link(conn, seed["manager_id"], now, signed=True)
+    at = _render(pg_dsn, signed)
+    assert [t.label for t in at.tabs] == ["✅ Cases to confirm", "📅 Team attendance"]
+    at.selectbox(key="tl_period").set_value(period)
+    at.run()
+    assert not at.exception, at.exception
+    table = at.dataframe[0].value
+    n_days = (tl_matrix.attendance_period(period)[1] - period).days + 1
+    assert list(table["CRM"]) == ["E-1"] and len(table.columns) == 2 + n_days
+    day_col = f"{period:%d %b}"
+    assert table[day_col][0] == "Pending"                      # flagged-only, undecided
+    assert "Absent" not in set(table.iloc[0, 2:])              # missing days are never Absent
+    assert "Missing" in set(table.iloc[0, 2:])
+    shown = _all_text(at)
+    assert "not absence" in shown                                # coverage warning is shown
+    for word in ("Hospital", "check"):
+        assert word not in shown and word not in table.to_string()
+
+
+def test_an_expired_signed_link_gets_no_team_tab(conn, pg_dsn, seed, monkeypatch):
+    import datetime
+    from cryptography.fernet import Fernet
+    from app import data, tl_links
+    monkeypatch.setenv("TOKEN_ENC_KEY", Fernet.generate_key().decode())
+    old = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=61)
+    tok = data.rotate_manager_link(conn, seed["manager_id"], old, signed=True)
+    at = _render(pg_dsn, tok)
+    assert len(at.tabs) == 0 and len(at.dataframe) == 0
+    assert [e.value for e in at.error] == [tl_links.EXPIRED_MESSAGE]

@@ -15,7 +15,7 @@ import os
 
 import streamlit as st
 
-from app import data, export_gate, ingest_flow, reminders, tl_links
+from app import data, export_gate, ingest_flow, reminders, tl_links, tl_matrix
 from app.dingtalk import DingTalkClient
 from app.mailer import SMTPMailer
 from app.report import build_links_workbook, reconcile
@@ -145,6 +145,57 @@ def render_tl(token: str):
     mgr = access.manager
 
     st.title("Attendance Verification")
+    if access.scope != tl_links.SCOPE_TEAM:          # legacy link: the case page only
+        _render_tl_cases(c, mgr)
+        return
+    tab_cases, tab_team = st.tabs(["✅ Cases to confirm", "📅 Team attendance"])
+    with tab_cases:
+        _render_tl_cases(c, mgr)
+    with tab_team:
+        _render_tl_team(c, mgr)
+
+
+def _render_tl_team(c, mgr):
+    """Read-only team attendance for one Attendance Period. Only a signed link reaches this, and
+    the manager comes from the link (data.tl_access) — never from user input."""
+    from app.attendance_view import tl_period_attendance
+    from ingestion.periods import attendance_period
+    today = tl_matrix.business_today()
+    options = tl_matrix.period_options(today)
+    start = st.selectbox("Attendance period", options, key="tl_period",
+                         format_func=lambda d: f"{d:%d %b %Y} → {attendance_period(d)[1]:%d %b %Y}")
+    rows = tl_period_attendance(c, mgr["id"], start)
+    if not rows:
+        st.info("No employees on your team for this period.")
+        return
+    s = tl_matrix.summary(rows, today)
+    m = st.columns(4)
+    m[0].metric("Employees", s["employees"])
+    m[1].metric("To confirm", s["to_confirm"])
+    m[2].metric("Pending", s["pending"])
+    m[3].metric("Missing days", s["missing_source"])
+    st.caption(f"Out of **{s['employee_days']}** employee-days so far (your team's days and your "
+               f"own case days, within employment dates): {s['source_cells']} with an uploaded cell "
+               f"({s['source_blank']} of them blank), {s['flagged_only']} flagged with no cell, "
+               f"{s['no_source_no_case']} with neither.")
+    warn = tl_matrix.coverage_warning(s)
+    if warn:
+        st.warning(warn)
+    if s["to_confirm"]:
+        st.info(f"You have **{s['to_confirm']}** day(s) to confirm — answer them on the "
+                "**Cases to confirm** tab. This table is read-only.")
+    only = st.multiselect("Show employees with", list(tl_matrix.FILTERS), key="tl_filter")
+    cols, table = tl_matrix.matrix(rows, set(only), today)
+    if not table:
+        st.caption("No employee matches the filter.")
+    else:
+        st.dataframe(table, use_container_width=True, hide_index=True,
+                     column_order=["CRM", "Employee", *cols])
+    with st.expander("Legend"):
+        st.markdown("\n".join(f"- **{k}** — {v}" for k, v in tl_matrix.LEGEND))
+
+
+def _render_tl_cases(c, mgr):
     st.caption(f"Team Leader: **{mgr['name'] or mgr['crm']}** — please confirm each flagged day for your team.")
 
     thanks = st.session_state.pop("tl_thanks", None)  # set on the previous run, survives the rerun
