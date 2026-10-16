@@ -14,6 +14,7 @@ from ingestion.periods import attendance_period
 PENDING, MISSING, BLANK = "Pending", "Missing", "Blank"
 WITHHELD = "—"            # not on this TL's team that day (another team, or the gap of a move)
 NOT_EMPLOYED = "n/e"      # before the join date / after the exit date, with no source cell
+UPCOMING = "Upcoming"     # a day after today: no attendance can exist yet
 
 ABSENT_LABELS = frozenset({"Absent", "No Show"})
 LEAVE_LABEL = "Leave"
@@ -34,34 +35,44 @@ LEGEND = [
     ("Leave", "an approved leave (the type is not shown)"),
     ("Missing", "no attendance was uploaded for that day — missing data, NOT an absence"),
     ("Blank", "the newest upload left that cell empty — NOT an absence"),
+    ("Flagged — review required", "the sheet flags this day; HRBP or the case's TL will review it"),
+    ("Unclassified", "a status the app can't show — ask your HRBP"),
+    (UPCOMING, "a day that hasn't happened yet"),
     (WITHHELD, "not on your team that day"),
     (NOT_EMPLOYED, "before the join date or after the exit date"),
 ]
 
 
-def cell(row) -> str:
-    """The text of one matrix cell."""
+def _upcoming(row, today) -> bool:
+    return today is not None and row["work_date"] > today
+
+
+def cell(row, today=None) -> str:
+    """The text of one matrix cell. `today` (business date) marks later days as Upcoming."""
     if row["visibility"] != "team" and not row["case_id"]:
         return WITHHELD
+    if _upcoming(row, today) and row["coverage"] == "none":
+        return UPCOMING
     label = row["tl_effective"]
     if row["employment"] and row["coverage"] == "none":
         return NOT_EMPLOYED
     return label or MISSING
 
 
-def _in_scope(row) -> bool:
-    """An employee-day that counts in the coverage figures: on the team (or an own case day) and
-    within the employment dates when they are known."""
-    return (row["visibility"] == "team" or bool(row["case_id"])) and not row["employment"]
+def _in_scope(row, today=None) -> bool:
+    """An employee-day that counts in the coverage figures: on the team (or an own case day),
+    within the employment dates when they are known, and not after today."""
+    return ((row["visibility"] == "team" or bool(row["case_id"])) and not row["employment"]
+            and not (_upcoming(row, today) and row["coverage"] == "none"))
 
 
-def summary(rows) -> dict:
+def summary(rows, today=None) -> dict:
     """Counts for the team summary. Denominator = employee-days in scope (_in_scope)."""
-    scope = [r for r in rows if _in_scope(r)]
+    scope = [r for r in rows if _in_scope(r, today)]
     by = Counter(r["coverage"] for r in scope)
     blank = sum(1 for r in scope if r["coverage"] == "full" and r["tl_effective"] == BLANK)
     return {
-        "employees": len({r["employee_id"] for r in rows if _in_scope(r)}),
+        "employees": len({r["employee_id"] for r in rows if _in_scope(r, today)}),
         "employee_days": len(scope),
         "source_cells": by["full"],
         "source_blank": blank,
@@ -83,7 +94,7 @@ def coverage_warning(s) -> str | None:
             "full attendance was stored) are mostly Missing or flagged-only.")
 
 
-def matrix(rows, only=None):
+def matrix(rows, only=None, today=None):
     """(day columns, table rows) for display. `only`: set of filter names; keeps employees with at
     least one in-scope day in a selected category."""
     days = sorted({r["work_date"] for r in rows})
@@ -94,8 +105,9 @@ def matrix(rows, only=None):
     cols = [f"{d:%d %b}" for d in days]
     out = []
     for (crm, name, _), emp_rows in sorted(by_emp.items(), key=lambda kv: (kv[0][1] or "", kv[0][0])):
-        cells = {r["work_date"]: cell(r) for r in emp_rows}
-        if wanted is not None and not any(_in_scope(r) and cell(r) in wanted for r in emp_rows):
+        cells = {r["work_date"]: cell(r, today) for r in emp_rows}
+        if wanted is not None and not any(_in_scope(r, today) and cell(r, today) in wanted
+                                          for r in emp_rows):
             continue
         out.append({"CRM": crm, "Employee": name or "",
                     **{c: cells.get(d, WITHHELD) for c, d in zip(cols, days)}})

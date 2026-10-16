@@ -112,7 +112,7 @@ def test_team_tab_only_for_a_signed_link_and_shows_the_matrix(conn, pg_dsn, seed
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("TOKEN_ENC_KEY", Fernet.generate_key().decode())
     assert "127.0.0.1" in pg_dsn
-    period = tl_matrix.period_options(tl_matrix.business_today(), n=1)[0]
+    period = tl_matrix.period_options(tl_matrix.business_today(), n=2)[1]   # a finished period
     seed["new_case"](seed["new_run"](), period, "Hospital visit - check")
     now = datetime.datetime.now(datetime.timezone.utc)
 
@@ -123,6 +123,9 @@ def test_team_tab_only_for_a_signed_link_and_shows_the_matrix(conn, pg_dsn, seed
     signed = data.rotate_manager_link(conn, seed["manager_id"], now, signed=True)
     at = _render(pg_dsn, signed)
     assert [t.label for t in at.tabs] == ["✅ Cases to confirm", "📅 Team attendance"]
+    at.selectbox(key="tl_period").set_value(period)
+    at.run()
+    assert not at.exception, at.exception
     table = at.dataframe[0].value
     n_days = (tl_matrix.attendance_period(period)[1] - period).days + 1
     assert list(table["CRM"]) == ["E-1"] and len(table.columns) == 2 + n_days
@@ -134,3 +137,15 @@ def test_team_tab_only_for_a_signed_link_and_shows_the_matrix(conn, pg_dsn, seed
     assert "not absence" in shown                                # coverage warning is shown
     for word in ("Hospital", "check"):
         assert word not in shown and word not in table.to_string()
+
+
+def test_an_expired_signed_link_gets_no_team_tab(conn, pg_dsn, seed, monkeypatch):
+    import datetime
+    from cryptography.fernet import Fernet
+    from app import data, tl_links
+    monkeypatch.setenv("TOKEN_ENC_KEY", Fernet.generate_key().decode())
+    old = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=61)
+    tok = data.rotate_manager_link(conn, seed["manager_id"], old, signed=True)
+    at = _render(pg_dsn, tok)
+    assert len(at.tabs) == 0 and len(at.dataframe) == 0
+    assert [e.value for e in at.error] == [tl_links.EXPIRED_MESSAGE]

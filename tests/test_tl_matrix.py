@@ -81,3 +81,15 @@ def test_to_confirm_lists_only_reviewable_days():
     rows = [row("E1", P, "Pending", case_id="c", reviewable=True, name="Zed"),
             row("E2", P, "Pending", case_id="d", reviewable=False)]
     assert m.to_confirm(rows) == [("Zed", P)]
+
+
+def test_future_days_are_upcoming_not_missing_and_not_counted():
+    today = P + dt.timedelta(9)
+    rows = [row("E1", P + dt.timedelta(i), "Missing" if i > 9 else "Present",
+                coverage="none" if i > 9 else "full") for i in range(30)]
+    assert m.cell(rows[20], today) == m.UPCOMING and m.cell(rows[20]) == m.MISSING
+    s = m.summary(rows, today)
+    assert (s["employee_days"], s["missing_source"]) == (10, 0)
+    assert m.coverage_warning(s) is None
+    assert m.matrix(rows, {"Missing"}, today)[1] == []
+    assert m.matrix(rows, None, today)[1][0][f"{P + dt.timedelta(20):%d %b}"] == m.UPCOMING
