@@ -23,9 +23,9 @@ from app.attachments import (EXPORT_EXPIRES_IN, evidence_columns, filter_by_crm,
                              group_by_case)
 from app.storage import StorageClient, object_path, validate_upload
 from app.tl_labels import tl_case_line, tl_done_line
+from app.effective import UNRESOLVED_STATES
 from app.verdicts import (HRBP_OVERRIDE_VERDICTS, PROOF_REQUIRED, VERDICT_LABEL, VERDICTS,
                           blocked_cases, is_blocked, unanswered, verdict_choices)
-from app.effective import UNRESOLVED_STATES
 from app.version import build_stamp
 from ingestion.config import load_aliases, load_dingtalk_ids
 from ingestion.reference import parse_reference_any
@@ -348,6 +348,9 @@ def render_hrbp():
                                               "(needs review)", "(undecided)"],
                                      help="(undecided) = Pending or Review required, including "
                                           "cases the old period close stored as Absent.")
+        st.caption("Cases the old period close (before 2026-10) stored as Absent count as "
+                   "**Closed** above but read **Pending**: they are not on the TL link, so only an "
+                   "HRBP Override decides them. Use *(undecided)* to list them.")
         listed = None if status_filter.startswith("(") else status_filter
         rows = data.list_cases(c, status=listed)
         if status_filter == "(needs review)":
@@ -707,7 +710,8 @@ def render_hrbp():
                    "undecided stays **open** and reads **Pending** (or **Review required** when the "
                    "newest upload no longer flags its day). Nothing is turned into Absent. TLs can "
                    "still answer on their link, and you can still decide any case with an HRBP "
-                   "Override. Each still-open case gets a note in its history.")
+                   "Override. Each still-open case gets a note in its history, so an upload "
+                   "whose cases are still open can no longer be removed afterwards.")
         st.caption("Expect Pending cells in the payroll export for anything still undecided.")
         typed = st.text_input("To confirm, type the word  CLOSE  in capitals:")
         if st.button("Close the period now", type="primary", disabled=(typed.strip() != "CLOSE")):

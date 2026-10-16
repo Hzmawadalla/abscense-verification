@@ -167,7 +167,6 @@ def test_reconciled_export_reflects_effective_status_and_marks_pending(conn, flo
     assert flagged == result.overwritten + result.unresolved
 
 
-
 def test_export_after_the_period_close_is_unchanged_and_still_pending(conn, flow):
     # the close decides nothing, so the export built after it is identical, Pending included
     def build():

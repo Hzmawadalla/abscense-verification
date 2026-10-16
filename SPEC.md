@@ -10,7 +10,8 @@ Each pay period, parse the attendance workbook, identify **disputable attendance
 (unexplained absences and unconfirmed leaves), and create one verification **case** per
 employee-day. Each **Team Leader (TL)** confirms/corrects their team's cases via a persistent,
 per-TL web page. **HRBP** reviews replies and closes or overrides. Verified verdicts merge back
-into the monthly attendance report. Unresolved cases stand as **Absent** when HRBP closes the period.
+into the monthly attendance report. Unresolved cases stay **Pending** when HRBP closes the period —
+never Absent (§6.5).
 
 The system replaces today's manual process: the per-manager `*Verification` tabs, the freeform
 `Notes` tab, and the in-cell "To Be Confirmed" annotations people currently hand-type.

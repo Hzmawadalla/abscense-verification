@@ -455,6 +455,35 @@ def test_sql_and_python_agree_on_what_is_undecided(conn, org):
     assert sql == py == {days[0], days[3]}
 
 
+def test_every_case_lands_in_exactly_one_export_list_matching_the_screen(conn, org):
+    # review M1/M2: legacy shapes no writer produces today must still agree with the screen and
+    # never fall out of both lists: a responded case with a TL answer, a closed row with NULL
+    # closed_by, a closed-by-TL row
+    days = [DAY + datetime.timedelta(days=i) for i in range(4)]
+    _load(conn, [_cell("E-1", d, "Absent", "trigger") for d in days],
+          [_flag("E-1", d) for d in days])
+    ids = [_case(conn, "E-1", d)["id"] for d in days]
+    _q(conn, "update attendance.cases set status = 'manager_responded', manager_status = 'present' "
+             "where id = %s", (ids[0],))
+    _q(conn, "update attendance.cases set status = 'closed', final_status = 'absent', "
+             "closed_by = null where id = %s", (ids[1],))
+    _answer(conn, ids[2], "absent")
+    unresolved = {r["work_date"] for r in data.list_unresolved_cases(conn)}
+    closed = {r["work_date"]: r["final_status"] for r in data.list_closed_cases(conn)}
+    assert unresolved == {days[3]} and not (unresolved & set(closed))
+    assert closed == {days[0]: "present", days[1]: "absent", days[2]: "absent"}
+    screen = {r["work_date"]: r["effective_status"] for r in data.list_cases(conn)}
+    assert screen == {days[0]: "Present", days[1]: "Absent", days[2]: "Absent", days[3]: PENDING}
+
+
+def test_pressing_close_twice_writes_one_entry_per_case(conn, org):
+    _load(conn, [_cell("E-1", DAY, "Absent", "trigger")], [_flag("E-1", DAY)])
+    first = data.close_open_month(conn, "hrbp:x")
+    second = data.close_open_month(conn, "hrbp:y")
+    assert first == second == {"pending": 1, "kept_for_review": 0}
+    assert len(_audit(conn, _case(conn, "E-1")["id"], data.PERIOD_CLOSE_ACTION)) == 1
+
+
 # ------------------------------------------------------------------ D4 goes away once mapped
 def test_d4_entry_disappears_once_the_crm_is_an_employee(conn, org):
     ghost = AttendanceCell(crm="E-GHOST", crm_key="e-ghost", work_date=DAY, raw_value="Normal",
