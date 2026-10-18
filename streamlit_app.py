@@ -15,7 +15,7 @@ import os
 
 import streamlit as st
 
-from app import data, export_gate, ingest_flow, reminders, tl_links, tl_matrix
+from app import assignment_check, data, export_gate, ingest_flow, reminders, tl_links, tl_matrix
 from app.dingtalk import DingTalkClient
 from app.mailer import SMTPMailer
 from app.report import build_links_workbook, reconcile
@@ -587,8 +587,9 @@ def render_hrbp():
             att_sha = hashlib.sha256(att_src.getvalue()).hexdigest()
             pending = {"key": current_key, "ref": ref, "res": res, "name": att_src.name,
                        "sha": att_sha,
-                       "preview": ingest_flow.build_preview(res, ref,
-                                                            data.uploads_with_hash(c, att_sha))}
+                       "preview": ingest_flow.build_preview(
+                           res, ref, data.uploads_with_hash(c, att_sha),
+                           assignment_check.read_changes_or_none(c, ref))}
             st.session_state["ingest_preview"] = pending
 
         if pending:

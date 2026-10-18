@@ -78,24 +78,45 @@ class ReferenceData:
     stats: dict = field(default_factory=dict)
 
 
+def _structure_entry(row):
+    """(employee_key, {tl_key, tl_raw, sm_raw, team, emp_raw}) for one Structure row, or None."""
+    ecrm = _clean(pick(row, "crm"))
+    if not ecrm or _is_junk_crm(ecrm):
+        return None
+    tl = _clean(pick(row, "tl/coach lead", "tl"))
+    if tl and (tl.lower() in PLACEHOLDERS or _is_junk_crm(tl)):
+        tl = None
+    sm = _clean(pick(row, "sm/ltl/stl", "sm"))
+    if sm and (sm.lower() in PLACEHOLDERS or _is_junk_crm(sm)):
+        sm = None
+    return _key(ecrm), {"tl_key": _key(tl), "tl_raw": tl,
+                        "sm_raw": sm, "team": _clean(pick(row, "team")), "emp_raw": ecrm}
+
+
 def _structure_map(struct_rows):
-    """employee_key -> {tl_key, tl_raw, sm_raw, team, emp_raw}."""
+    """employee_key -> {tl_key, tl_raw, sm_raw, team, emp_raw}. A CRM listed more than once: the
+    LAST row is used (unchanged behaviour; _structure_duplicates reports it)."""
     mapping = {}
     for row in struct_rows:
-        ecrm = _clean(pick(row, "crm"))
-        if not ecrm or _is_junk_crm(ecrm):
-            continue
-        tl = _clean(pick(row, "tl/coach lead", "tl"))
-        if tl and (tl.lower() in PLACEHOLDERS or _is_junk_crm(tl)):
-            tl = None
-        sm = _clean(pick(row, "sm/ltl/stl", "sm"))
-        if sm and (sm.lower() in PLACEHOLDERS or _is_junk_crm(sm)):
-            sm = None
-        mapping[_key(ecrm)] = {
-            "tl_key": _key(tl), "tl_raw": tl,
-            "sm_raw": sm, "team": _clean(pick(row, "team")), "emp_raw": ecrm,
-        }
+        entry = _structure_entry(row)
+        if entry:
+            mapping[entry[0]] = entry[1]
     return mapping
+
+
+def _structure_duplicates(struct_rows):
+    """(CRMs listed more than once in Structure, those of them whose rows name different TLs),
+    each a sorted list of the CRM as first written. Report only: nothing is changed."""
+    tls, raw = {}, {}
+    for row in struct_rows:
+        entry = _structure_entry(row)
+        if entry:
+            key, m = entry
+            tls.setdefault(key, []).append(m["tl_key"])
+            raw.setdefault(key, m["emp_raw"])
+    dups = sorted(raw[k] for k, v in tls.items() if len(v) > 1)
+    conflicting = sorted(raw[k] for k, v in tls.items() if len(set(v)) > 1)
+    return dups, conflicting
 
 
 def _find_active_sheet(wb):
@@ -142,6 +163,19 @@ def parse_active_employees(path, sheet=None, header_row=None):
 
     managers = {}   # identity key (lowercased crm or email) -> Manager
     seen = set()
+    # report only (Phase 3 decision F): a repeated CRM keeps its FIRST row, as before
+    first_lm, dups, conflicting = {}, set(), set()
+    for row in rows:
+        crm = _clean(pick(row, "crm account"))
+        if not crm or _is_junk_crm(crm):
+            continue
+        lm = (_clean(pick(row, "line manager employee id")), _key(_clean(pick(row, "line manager email"))))
+        if _key(crm) in first_lm:
+            dups.add(first_lm[_key(crm)][0])
+            if first_lm[_key(crm)][1] != lm:
+                conflicting.add(first_lm[_key(crm)][0])
+        else:
+            first_lm[_key(crm)] = (crm, lm)
     for row in rows:
         crm = _clean(pick(row, "crm account"))
         if not crm or _is_junk_crm(crm) or _key(crm) in seen:
@@ -183,7 +217,10 @@ def parse_active_employees(path, sheet=None, header_row=None):
     ref.managers = list(managers.values())
     mapped = sum(1 for e in ref.employees if e.manager_crm)
     ref.stats = {"managers": len(ref.managers), "employees": len(ref.employees),
-                 "mapped_employees": mapped, "exceptions": len(ref.exceptions)}
+                 "mapped_employees": mapped, "exceptions": len(ref.exceptions),
+                 "duplicate_crms": sorted(dups), "duplicate_rule": "the first row is used",
+                 "structure_duplicate_crms": [], "conflicting_tl_crms": sorted(conflicting),
+                 "conflict_rule": "the first row's line manager is used"}
     return ref
 
 
@@ -213,7 +250,7 @@ def parse_reference(path, hc_sheet="HC", structure_sheet="Structure", aliases=No
     ref = ReferenceData()
 
     # HC master keyed case-insensitively; keep HC's canonical casing + row.
-    hc_by_key = {}
+    hc_by_key, hc_dups = {}, set()
     for row in hc_rows:
         crm = _clean(pick(row, "crm"))
         if crm is None:
@@ -221,9 +258,12 @@ def parse_reference(path, hc_sheet="HC", structure_sheet="Structure", aliases=No
         if _is_junk_crm(crm):
             ref.exceptions.append(RefException(crm, "invalid_crm", "malformed CRM in HC"))
             continue
+        if _key(crm) in hc_by_key:
+            hc_dups.add(hc_by_key[_key(crm)][0])            # the FIRST HC row is used
         hc_by_key.setdefault(_key(crm), (crm, row))
 
     st_map = _structure_map(st_rows)
+    st_dups, st_conflicts = _structure_duplicates(st_rows)
 
     # Managers = distinct Team Leaders; resolve via HC, then alias, else flag.
     tl_by_key = {}
@@ -292,5 +332,9 @@ def parse_reference(path, hc_sheet="HC", structure_sheet="Structure", aliases=No
         "employees": len(ref.employees),
         "mapped_employees": sum(1 for e in ref.employees if e.manager_crm),
         "exceptions": len(ref.exceptions),
+        # report only (Phase 3 decision F): which rows were used is unchanged
+        "duplicate_crms": sorted(hc_dups), "duplicate_rule": "the first HC row is used",
+        "structure_duplicate_crms": st_dups, "conflicting_tl_crms": st_conflicts,
+        "conflict_rule": "the last Structure row's TL is used",
     }
     return ref

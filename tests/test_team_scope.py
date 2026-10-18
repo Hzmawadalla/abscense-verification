@@ -88,6 +88,69 @@ def test_adjacent_same_tl_stretches_are_one_no_gap_inside():
     assert not on_team(s, B, A, D(2026, 9, 23))
 
 
-def test_a_first_no_tl_stretch_gives_the_later_tl_no_earlier_days():
+def test_a_first_no_tl_stretch_now_belongs_to_the_first_recorded_tl():
+    # replaces the pre-2026-10-18 expectation (the later TL got no earlier days): the approved
+    # first-TL rule gives those days, the no-TL day included, to the first recorded TL
     s = [Stretch(None, D(2026, 9, 1), D(2026, 9, 1)), Stretch(A, D(2026, 9, 20), D(2026, 9, 20))]
-    assert not on_team(s, A, A, D(2026, 9, 10)) and on_team(s, A, A, D(2026, 9, 20))
+    assert on_team(s, A, A, D(2026, 9, 10)) and on_team(s, A, A, D(2026, 9, 1))
+    assert on_team(s, A, A, D(2026, 9, 20)) and not on_team(s, A, B, D(2026, 9, 10))
+
+
+# ------------------------------------------------------------------ approved rule (decision B)
+# The user approved: the current TL owns all historical attendance before the first recorded
+# transfer — a documented limitation (earlier assignment history is unknown). These tests pin it.
+def test_approved_rule_the_seeded_current_tl_owns_all_history_before_the_first_transfer():
+    seed = Stretch(A, D(2026, 10, 20), D(2026, 10, 20))             # migration day
+    moved = [seed, Stretch(B, D(2026, 11, 10), D(2026, 11, 10))]
+    assert on_team(moved, B, A, D(2024, 1, 1))                       # far back: still A's
+    assert on_team(moved, B, A, D(2026, 10, 20)) and not on_team(moved, B, A, D(2026, 10, 21))
+    assert not on_team(moved, B, B, D(2026, 11, 9)) and on_team(moved, B, B, D(2026, 11, 10))
+
+
+def test_approved_rule_applies_to_an_employee_first_recorded_after_the_migration():
+    # not seeded (no TL at migration time), first recorded under C later: C owns earlier days too —
+    # the same documented limitation, stated explicitly
+    s = [Stretch(C, D(2026, 11, 3), D(2026, 11, 3))]
+    assert on_team(s, C, C, D(2026, 9, 1))
+
+
+# ------------------------------------------------------------------ approved first-TL rule
+# Approved 2026-10-18: if an employee has no TL assignment recorded at the start of tracking, the
+# first subsequently recorded TL owns all earlier attendance history; later transfers keep the
+# inclusive boundaries and the unowned gap.
+def test_first_tl_rule_no_tl_at_tracking_start_then_tl_a_owns_all_earlier_days():
+    s = [Stretch(None, D(2026, 10, 20), D(2026, 10, 20)),          # tracking start: no TL
+         Stretch(A, D(2026, 11, 3), D(2026, 11, 3))]                # later: TL-A
+    for day in (D(2024, 1, 1), D(2026, 9, 1), D(2026, 10, 20), D(2026, 11, 2), D(2026, 11, 3),
+                D(2027, 3, 1)):
+        assert on_team(s, A, A, day), day
+    assert not any(on_team(s, A, tl, D(2026, 10, 20)) for tl in (B, None))
+
+
+def test_first_tl_rule_then_a_transfer_keeps_the_inclusive_boundaries_and_the_gap():
+    s = [Stretch(None, D(2026, 10, 20), D(2026, 10, 20)),
+         Stretch(A, D(2026, 11, 3), D(2026, 11, 10)),               # A last seen 10 Nov
+         Stretch(B, D(2026, 11, 20), D(2026, 11, 20))]              # B first seen 20 Nov
+    a, b = days(s, B, A), days(s, B, B)
+    assert min(a) == D(2026, 8, 1) and max(a) == D(2026, 11, 10)   # all earlier days, then up to A's last
+    assert min(b) == D(2026, 11, 20) and max(b) == D(2026, 12, 31)
+    gap = {D(2026, 11, 11) + dt.timedelta(i) for i in range(9)}     # 11-19 Nov
+    assert not gap & (a | b) and not a & b
+
+
+def test_first_tl_rule_does_not_touch_a_no_tl_stretch_after_the_first_tl():
+    s = [Stretch(None, D(2026, 10, 20), D(2026, 10, 20)), Stretch(A, D(2026, 11, 3), D(2026, 11, 3)),
+         Stretch(None, D(2026, 11, 15), D(2026, 11, 15)), Stretch(B, D(2026, 12, 1), D(2026, 12, 1))]
+    assert on_team(s, B, A, D(2026, 10, 20)) and on_team(s, B, A, D(2026, 11, 3))
+    assert not any(on_team(s, B, tl, D(2026, 11, 15)) for tl in (A, B))
+    assert not on_team(s, B, A, D(2026, 11, 4)) and not on_team(s, B, B, D(2026, 11, 30))
+
+
+def test_first_tl_rule_only_no_tl_stretches_means_nobody():
+    s = [Stretch(None, D(2026, 10, 20), D(2026, 10, 20)), Stretch(None, D(2026, 11, 3), D(2026, 11, 3))]
+    assert not any(on_team(s, None, tl, D(2026, 10, 1)) for tl in (A, B, None))
+
+
+def test_first_tl_rule_leaves_employees_with_no_stretch_unchanged():
+    assert on_team([], A, A, D(2020, 1, 1)) and not on_team([], A, B, D(2026, 9, 20))
+    assert not on_team([], None, A, D(2026, 9, 20))
