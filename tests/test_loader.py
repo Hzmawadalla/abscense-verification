@@ -22,7 +22,10 @@ def test_load_reference_upserts_managers_before_employees(sample_workbook_with_s
     db = FakeDB()
     loader.load_reference(db, ref)
 
-    assert [c[0] for c in db.calls] == ["many", "many"]
+    # changed on purpose (Phase 3 PR B): a third statement records team assignments
+    assert [c[0] for c in db.calls] == ["many", "many", "many"]
+    assert db.calls[2][1] == loader.RECORD_ASSIGNMENTS
+    assert db.calls[2][2] == [{"crms": [e.crm for e in ref.employees], "on": None}]
     assert db.calls[0][1] == loader.UPSERT_MANAGER
     assert len(db.calls[0][2]) == len(ref.managers)
     assert db.calls[1][1] == loader.UPSERT_EMPLOYEE

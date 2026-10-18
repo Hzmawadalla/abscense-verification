@@ -147,6 +147,38 @@ where d.ingestion_run_id = %(run_id)s::uuid
 """
 
 
+# Phase 3: after the employee upsert, compare each listed employee's TL with their latest recorded
+# stretch. Same TL -> extend that stretch's last_seen_on to this upload's date. Different TL (or no
+# stretch yet) -> open a new stretch seen from this date. A NULL TL (unmapped in Structure) is
+# recorded too: it ends the previous team's stretch. Nothing is ever deleted or rewritten backwards.
+RECORD_ASSIGNMENTS = """
+with seen_on as (
+  select coalesce(%(on)s::date, (now() at time zone 'Africa/Cairo')::date) as d
+),
+listed as (
+  select e.id as employee_id, e.manager_id from attendance.employees e where e.crm = any(%(crms)s)
+),
+latest as (
+  select distinct on (t.employee_id) t.id, t.employee_id, t.manager_id
+    from attendance.team_assignments t
+   where t.employee_id in (select employee_id from listed)
+   order by t.employee_id, t.first_seen_on desc, t.id desc
+),
+extended as (
+  update attendance.team_assignments t
+     set last_seen_on = greatest(t.last_seen_on, (select d from seen_on))
+    from listed l join latest x on x.employee_id = l.employee_id
+   where t.id = x.id and x.manager_id is not distinct from l.manager_id
+  returning t.id
+)
+insert into attendance.team_assignments (employee_id, manager_id, first_seen_on, last_seen_on, source)
+select l.employee_id, l.manager_id, s.d, s.d, 'reference_upload'
+  from listed l cross join seen_on s
+  left join latest x on x.employee_id = l.employee_id
+ where x.employee_id is null or x.manager_id is distinct from l.manager_id
+"""
+
+
 def manager_params(m):
     return (m.crm, m.name, m.email)
 
@@ -180,10 +212,16 @@ class LoadSummary:
     exceptions: int
 
 
-def load_reference(db: DB, reference) -> None:
-    """Upsert managers then employees (managers first so the employee FK subselect resolves)."""
+def load_reference(db: DB, reference, seen_on=None) -> None:
+    """Upsert managers then employees (managers first so the employee FK subselect resolves), then
+    record each employee's TL as observed by this upload (team_assignments, Phase 3).
+
+    `seen_on` is the observation date; None = today in Africa/Cairo (tests pass a date)."""
     db.many(UPSERT_MANAGER, [manager_params(m) for m in reference.managers])
     db.many(UPSERT_EMPLOYEE, [employee_params(e) for e in reference.employees])
+    crms = [e.crm for e in reference.employees]
+    if crms:
+        db.many(RECORD_ASSIGNMENTS, [{"crms": crms, "on": seen_on}])
 
 
 def load_ingestion(db: DB, result, reference=None, source_filename=None, range_start=None,
