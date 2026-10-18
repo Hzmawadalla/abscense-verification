@@ -9,6 +9,7 @@ Kept free of Streamlit so the flow is testable (same split as app.verdicts / app
 """
 import hashlib
 
+from app import assignment_check
 from ingestion import loader
 from ingestion.db_psycopg import PsycopgDB
 from ingestion.periods import attendance_period
@@ -21,8 +22,9 @@ def preview_key(ref_bytes, att_bytes, year) -> tuple:
     return digest(ref_bytes), digest(att_bytes), int(year)
 
 
-def build_preview(res, ref, earlier_uploads=()) -> dict:
-    """What HRBP confirms: resolved range, periods, counts and warnings. No cell contents."""
+def build_preview(res, ref, earlier_uploads=(), assignment_changes=None) -> dict:
+    """What HRBP confirms: resolved range, periods, counts and warnings. No cell contents.
+    `assignment_changes`: app.assignment_check.read_changes(...) — advisory warnings only."""
     first, last = res.stats["date_range"]
     dates = sorted({c.work_date for c in res.cells}) or [first, last]
     periods = sorted({attendance_period(d) for d in dates})
@@ -39,6 +41,7 @@ def build_preview(res, ref, earlier_uploads=()) -> dict:
         "mapped": (ref.stats.get("mapped_employees"), ref.stats.get("employees")),
         "earlier_uploads": len(earlier_uploads),
         "first_uploaded_at": earlier_uploads[0]["created_at"] if earlier_uploads else None,
+        "assignment_warnings": assignment_check.warning_lines(assignment_changes, ref.stats),
     }
 
 
@@ -68,6 +71,7 @@ def preview_lines(p) -> list[str]:
         lines.append(f"⚠️ This exact file was already uploaded {p['earlier_uploads']} time(s) "
                      f"(first {p['first_uploaded_at']:%Y-%m-%d %H:%M}). Loading it again makes it "
                      "the newest source; its values are the same.")
+    lines.extend(p.get("assignment_warnings") or [])
     return lines
 
 

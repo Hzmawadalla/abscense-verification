@@ -4,15 +4,18 @@ Source: attendance.team_assignments, one stretch per employee x TL as observed b
 (HC + Structure) uploads. first_seen_on / last_seen_on are OBSERVATION dates (the upload days):
 a conservative proxy for the real HR move date, never the move date itself.
 
-Rules (approved 2026-10-16), for the stretches of one employee in order:
-  * the FIRST stretch also covers every earlier day ("before the first recorded move", so a TL
-    keeps the history of an employee who never moved — the behaviour before PR B);
+Rules (approved 2026-10-16, first-TL rule approved 2026-10-18), for the stretches of one
+employee in order:
+  * the FIRST stretch WITH A TL also covers every earlier day ("before the first recorded move",
+    so a TL keeps the history of an employee who never moved — the behaviour before PR B). If the
+    employee had no TL at the start of tracking (leading no-TL stretches), that first recorded TL
+    owns all earlier days too, the leading no-TL days included;
   * the LAST stretch also covers every later day, but only while it still matches the employee's
     current TL (employees.manager_id); otherwise it ends at its last_seen_on (fail closed);
   * any other stretch covers first_seen_on .. last_seen_on, both inclusive;
   * days between two stretches (between the last upload showing the old TL and the first showing
     the new one) belong to NOBODY's team view: the move happened somewhere in there;
-  * a stretch with no TL (manager_id None) is nobody's team;
+  * a stretch with no TL (manager_id None) AFTER the first TL stretch is nobody's team;
   * an employee with no stretch at all (never seen since PR B) keeps the pre-PR B rule: their
     current TL, every day.
 So the previous TL keeps the days up to the last upload that showed them as TL, the new TL gets
@@ -20,8 +23,9 @@ the days from the first upload that shows the move, and neither sees the other's
 on a day when two uploads showed both TLs (both stretches include that day).
 Adjacent stretches with the same TL are read as one (see merged()).
 
-Operational notes: one Structure upload that leaves an employee unmapped records a no-TL stretch,
-and the days until the next upload showing a TL belong to nobody; history is never rewritten, so
+Operational notes: one Structure upload that leaves an employee unmapped (after they had a TL)
+records a no-TL stretch, and the days until the next upload showing a TL belong to nobody; history
+is never rewritten, so
 such a gap can only be closed by a separately approved repair.
 Case days are separate: a TL always sees days with a case assigned to them (app.attendance_view).
 """
@@ -56,10 +60,14 @@ def on_team(stretches, current_manager_id, manager_id, day) -> bool:
         return current_manager_id == manager_id
     stretches = merged(stretches)
     last = len(stretches) - 1
+    # the first stretch WITH a TL reaches back over every earlier day, including leading no-TL
+    # stretches (approved 2026-10-18: no TL at the start of tracking -> the first recorded TL owns
+    # the earlier history)
+    first_tl = next((i for i, s in enumerate(stretches) if s.manager_id is not None), None)
     for i, s in enumerate(stretches):
         if s.manager_id != manager_id:
             continue
-        starts = i == 0 or day >= s.first_seen_on
+        starts = i == first_tl or day >= s.first_seen_on
         open_end = i == last and s.manager_id == current_manager_id
         ends = open_end or day <= s.last_seen_on
         if starts and ends:
