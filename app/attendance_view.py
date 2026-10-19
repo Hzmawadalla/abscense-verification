@@ -132,7 +132,11 @@ def hrbp_period_attendance(conn, period_start, manager_id=None):
 TL_ROW_FIELDS = ("employee_id", "employee_crm", "employee_name", "work_date", "period_start",
                  "period_end", "is_half_day", "coverage", "flagged", "pending", "case_id",
                  "case_status", "tl_answered_at", "hrbp_overridden", "source_changed_since_response",
-                 "employment", "status", "tl_answer", "hrbp_override_value", "visibility")
+                 "employment", "status", "tl_answer", "hrbp_override_value", "visibility",
+                 "tl_effective", "reviewable")
+
+# The TL-facing effective status (Phase 3): app.effective decides, then the label policy masks it.
+TL_PENDING, TL_MISSING, TL_BLANK = "Pending", "Missing", "Blank"
 
 # A "case-only" employee (on another TL's team, included only because a case is assigned to this TL
 # in the period) is visible ONLY on those case days; every other day of theirs is withheld.
@@ -140,7 +144,7 @@ _WITHHELD = {"status": None, "is_half_day": False, "coverage": "none",
              "flagged": False, "pending": False, "case_id": None, "case_status": None,
              "tl_answer": None, "tl_answered_at": None, "hrbp_overridden": False,
              "hrbp_override_value": None, "source_changed_since_response": False,
-             "employment": None}
+             "employment": None, "tl_effective": None, "reviewable": False}
 
 
 def _tl_status(r):
@@ -153,6 +157,27 @@ def _tl_status(r):
     if r["coverage"] == "flagged_only":       # a case exists only for a flagged day
         return tl_status_label(r["case_source_status"], flagged=True)
     return None
+
+
+def _tl_effective(r):
+    """The Phase 2 effective status (app.effective, the single precedence rule) as a TL may see it:
+    the deciding layer's value through app.tl_labels, Pending for anything undecided (Review
+    required included), and Missing / Blank for days with no source value. Never raw text, never a
+    leave subtype, never Absent for missing data."""
+    e = effective.for_grid_row(r)
+    if e.source == effective.SOURCE_OVERRIDE:
+        return tl_verdict_label(r["final_status"])
+    if e.source == effective.SOURCE_TL:
+        return tl_verdict_label(r["tl_answer"])
+    if e.status in effective.UNRESOLVED_STATES:
+        return TL_PENDING
+    if e.source == effective.SOURCE_NONE or e.status == effective.MISSING:
+        return TL_MISSING
+    if e.status == effective.BLANK:
+        return TL_BLANK
+    if e.source == effective.SOURCE_ORIGINAL:
+        return _tl_status(r) or TL_MISSING
+    return tl_verdict_label(r["final_status"])        # a closed case's final status
 
 
 # Case-derived inputs of a grid row (see _GRID_SQL); cleared when the case belongs to another TL.
@@ -216,6 +241,9 @@ def tl_period_attendance(conn, manager_id, period_start):
         member = team_scope.on_team(history.get(r["employee_id"], []), r["current_manager_id"],
                                     manager_id, r["work_date"])
         row["visibility"] = "team" if member else "case_only"
+        row["tl_effective"] = _tl_effective(r)
+        row["reviewable"] = bool(r["case_id"] and r["case_manager_id"] == manager_id
+                                 and r["case_status"] == "open")
         if not member and not (r["case_id"] and r["case_manager_id"] == manager_id):
             row.update(_WITHHELD)
         out.append({k: row[k] for k in TL_ROW_FIELDS})
