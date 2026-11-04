@@ -27,6 +27,7 @@ from app.effective import UNRESOLVED_STATES
 from app.verdicts import (HRBP_OVERRIDE_VERDICTS, PROOF_REQUIRED, VERDICT_LABEL, VERDICTS,
                           blocked_cases, is_blocked, unanswered, verdict_choices)
 from app.version import build_stamp
+from app.dbconn import UNAVAILABLE_MESSAGE as DB_UNAVAILABLE_MESSAGE, open_connection
 from ingestion.config import load_aliases, load_dingtalk_ids
 from ingestion.reference import parse_reference_any
 from ingestion.summary import UnsafeWorkbookError, ingest_summary
@@ -54,7 +55,13 @@ def get_conn():
     # process is killed (reboot/redeploy), the pooled connection would otherwise linger holding
     # locks and block later writes until statement_timeout. Multi-statement writes that need
     # atomicity use explicit `with conn.transaction()` blocks (see the ingest tab).
-    cn = psycopg.connect(dsn, autocommit=True, prepare_threshold=None)
+    # Bounded connect wait + TCP keepalives (app/dbconn.py): a slow or resuming database now shows
+    # a clear message instead of leaving every new visitor on an endless spinner.
+    try:
+        cn = open_connection(dsn)
+    except psycopg.OperationalError:
+        st.error(DB_UNAVAILABLE_MESSAGE)
+        st.stop()
     # Safety net for any transaction that does linger (e.g. process killed mid-ingest): make the
     # server auto-abort it (and release its locks) quickly instead of holding until the timeout.
     cn.execute("set idle_in_transaction_session_timeout = '30s'")
