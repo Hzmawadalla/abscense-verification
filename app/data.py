@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 from psycopg.rows import dict_row
 
-from app import effective, security, tl_links
+from app import effective, security, tl_links, waive
 from app.tl_labels import tl_status_label, tl_verdict_label
 from ingestion.summary import UNMAPPED_NO_FLAGS
 
@@ -414,6 +414,68 @@ def close_case(conn, case_id, actor, final_status=None, final_leave_type=None, c
         _audit(cur, case_id, actor, "hrbp_override" if final_status else "hrbp_close", old, new)
     conn.commit()
     return True
+
+
+# --------------------------------------------------------------------------- waive (HRBP)
+# A case HRBP may waive (alias `c`): still open, no TL answer, no HRBP override (app.waive).
+CASE_WAIVABLE = ("(c.status = 'open' and c.manager_status is null "
+                 " and c.hrbp_override_at is null)")
+
+
+def list_waivable_cases(conn):
+    """Every case HRBP may waive (CASE_WAIVABLE), for app.waive.filter_cases."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "select c.id, c.work_date, c.source_status, c.is_half_day, c.manager_id, "
+            "       e.name as employee_name, e.crm as employee_crm, m.name as manager_name, "
+            f"       {CASE_UNFLAGGED_NOW} as unflagged "
+            "from attendance.cases c "
+            "join attendance.employees e on e.id = c.employee_id "
+            "left join attendance.managers m on m.id = c.manager_id "
+            f"where {CASE_WAIVABLE} "
+            "order by e.name, e.crm, c.work_date")
+        return cur.fetchall()
+
+
+def waive_cases(conn, case_ids, actor, reason) -> dict:
+    """Close the given cases as Absent on HRBP's decision (app.waive), in one transaction.
+
+    Only a case that is still waivable at the moment of the write is closed: the guard is in the
+    UPDATE itself, so a case a TL answered (or HRBP overrode) after the list was loaded is skipped,
+    never overwritten. Each waived case gets one 'hrbp_waive' audit entry with the actor and reason.
+    The reason and ids are checked before anything is read. Returns {'waived': n, 'skipped': n}."""
+    reason = waive.validate_reason(reason)
+    ids = waive.normalize_ids(case_ids)
+    if not ids:
+        return {"waived": 0, "skipped": 0}
+    waived = skipped = 0
+    new = {"status": "closed", "final_status": waive.WAIVE_VERDICT,
+           "closed_by": waive.WAIVE_CLOSED_BY, "reason": reason}
+    try:
+        with conn.cursor(row_factory=dict_row) as cur:
+            for cid in ids:
+                cur.execute("select status, manager_status, final_status, closed_by, "
+                            "hrbp_override_at from attendance.cases where id = %s", (cid,))
+                old = cur.fetchone()
+                if old is None:
+                    skipped += 1
+                    continue
+                cur.execute(
+                    "update attendance.cases set status = 'closed', final_status = %s, "
+                    "closed_by = %s, closed_at = now() "
+                    "where id = %s and status = 'open' and manager_status is null "
+                    "and hrbp_override_at is null",
+                    (waive.WAIVE_VERDICT, waive.WAIVE_CLOSED_BY, cid))
+                if cur.rowcount == 0:
+                    skipped += 1
+                    continue
+                waived += 1
+                _audit(cur, cid, actor, waive.WAIVE_ACTION, dict(old), new)
+    except Exception:
+        conn.rollback()          # all or nothing: no case closes without its audit entry
+        raise
+    conn.commit()
+    return {"waived": waived, "skipped": skipped}
 
 
 # An open case whose day the newest upload no longer flags (a non-trigger cell, blank included).
