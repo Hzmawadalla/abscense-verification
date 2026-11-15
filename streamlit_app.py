@@ -27,6 +27,7 @@ from app.effective import UNRESOLVED_STATES
 from app.verdicts import (HRBP_OVERRIDE_VERDICTS, PROOF_REQUIRED, VERDICT_LABEL, VERDICTS,
                           blocked_cases, is_blocked, unanswered, verdict_choices)
 from app.version import build_stamp
+from app import waive_panel
 from app.dbconn import UNAVAILABLE_MESSAGE as DB_UNAVAILABLE_MESSAGE, open_connection
 from ingestion.config import load_aliases, load_dingtalk_ids
 from ingestion.reference import parse_reference_any
@@ -758,6 +759,8 @@ def render_hrbp():
                            f"open: **{res['pending']}** Pending, **{res['kept_for_review']}** "
                            "Review required (the newest upload no longer flags the day). None was "
                            "set to Absent. Decide them on the Dashboard with an HRBP Override.")
+        st.divider()
+        waive_panel.render(c, actor)
 
     with tab_export:
         st.write("Re-upload this period's attendance workbook to get it back with every **decided** "
