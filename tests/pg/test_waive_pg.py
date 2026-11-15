@@ -81,6 +81,24 @@ def test_a_waived_case_reads_absent_everywhere(conn, org):
     assert {m["crm"]: m["open_cases"] for m in data.managers_overview(conn)}["TL-A"] == 1
 
 
+def test_the_export_comment_carries_the_waive_reason(conn, org):
+    ids = _three_open_cases(conn)
+    p2._answer(conn, ids["E-2"], "present")
+    data.waive_cases(conn, [ids["E-1"]], "hrbp:x", "TL on leave")
+    comments = {r["employee_crm"]: r["manager_comment"] for r in data.list_closed_cases(conn)}
+    assert comments["E-1"] == "Waived: TL on leave"
+    assert not (comments["E-2"] or "").startswith("Waived:")      # TL comments untouched
+
+
+def test_an_override_after_a_waive_drops_the_waive_reason(conn, org):
+    ids = _three_open_cases(conn)
+    data.waive_cases(conn, [ids["E-1"]], "hrbp:x", "TL on leave")
+    data.close_case(conn, ids["E-1"], "hrbp:x", "present", None, "proof arrived")
+    row = next(r for r in data.list_closed_cases(conn) if r["employee_crm"] == "E-1")
+    assert row["final_status"] == "present"
+    assert not (row["manager_comment"] or "").startswith("Waived:")
+
+
 def test_waiving_twice_is_harmless(conn, org):
     ids = _three_open_cases(conn)
     assert data.waive_cases(conn, [ids["E-1"]], "hrbp:x", "r") == {"waived": 1, "skipped": 0}

@@ -353,18 +353,29 @@ def list_unresolved_cases(conn):
         return cur.fetchall()
 
 
+CASE_EXPORT_COMMENT = (
+    f"(case when c.closed_by = '{waive.WAIVE_CLOSED_BY}' then 'Waived: ' || coalesce(("
+    "   select l.new_value->>'reason' from attendance.audit_log l "
+    f"   where l.case_id = c.id and l.action = '{waive.WAIVE_ACTION}' "
+    "   order by l.created_at desc, l.id desc limit 1), '') "
+    " else c.manager_comment end)")
+
+
 def list_closed_cases(conn):
     """Decided cases (for the reconciled export): CRM x date x source -> final verdict
     (CASE_DECIDED_FINAL). Exactly the cases list_unresolved_cases leaves out that carry a decision.
 
     An old period-close row without any decision is undecided (list_unresolved_cases). One that
     does carry a TL answer exports that answer: TL Response beats the cutoff's default, exactly as
-    app.effective shows it. closed_by stays as stored."""
+    app.effective shows it. closed_by stays as stored.
+
+    A waived case has no TL comment (only unanswered cases can be waived), so its Comment carries
+    the HRBP's waive reason instead: "Waived: <reason>"."""
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             "select e.crm as employee_crm, e.name as employee_name, m.name as manager_name, "
             f"       c.work_date, c.source_status, {CASE_DECIDED_FINAL} as final_status, "
-            "       c.closed_by, c.manager_comment "
+            f"       c.closed_by, {CASE_EXPORT_COMMENT} as manager_comment "
             "from attendance.cases c "
             "join attendance.employees e on e.id = c.employee_id "
             "left join attendance.managers m on m.id = c.manager_id "
